@@ -52,8 +52,50 @@ pub async fn create_element(state: State<'_, Database>, element: Element) -> Res
 }
 
 #[tauri::command]
+pub async fn update_element_content(state: State<'_, Database>, id: Uuid, content: serde_json::Value) -> Result<(), String> {
+    let elem = state.get_element(&id).map_err(|e| e.to_string())?;
+    state.update_element_content(&id, &content, elem.style.as_ref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn update_element_style(state: State<'_, Database>, id: Uuid, style: Option<serde_json::Value>) -> Result<(), String> {
+    state.update_element_style(&id, style.as_ref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn update_element_board_id(state: State<'_, Database>, id: Uuid, board_id: Uuid) -> Result<(), String> {
+    state.update_element_board_id(&id, &board_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn delete_element(state: State<'_, Database>, id: Uuid) -> Result<(), String> {
     state.delete_element(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn sync_board_state(state: State<'_, Database>, board_id: Uuid, elements: Vec<Element>) -> Result<(), String> {
+    let existing_elements = state.get_board_elements(&board_id).map_err(|e| e.to_string())?;
+    let new_ids: std::collections::HashSet<Uuid> = elements.iter().map(|e| e.id).collect();
+    
+    // Delete missing elements
+    for old_el in &existing_elements {
+        if !new_ids.contains(&old_el.id) {
+            let _ = state.delete_element(&old_el.id);
+        }
+    }
+    
+    // Update or create
+    for el in elements {
+        if existing_elements.iter().any(|old| old.id == el.id) {
+            let _ = state.update_element_position(&ElementPositionUpdate {
+                id: el.id, x: el.x, y: el.y, width: el.width, height: el.height, z_index: el.z_index,
+            });
+            let _ = state.update_element_content(&el.id, &el.content, el.style.as_ref());
+        } else {
+            let _ = state.create_element(&el);
+        }
+    }
+    Ok(())
 }
 
 #[tauri::command]

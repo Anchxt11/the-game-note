@@ -1,88 +1,68 @@
-import { Element, ElementPositionUpdate } from '../types';
+import { Element, ElementPositionUpdate, Board, SearchResult } from '../types';
+import { invoke } from '@tauri-apps/api/core';
 
-// In-memory persistent database storage simulating SQLite IPC calls.
-// Initialized 100% empty on boot per user instructions!
-let inMemoryElements: Element[] = [];
+let rootBoardIdCache: string | null = null;
 
-const LOCAL_STORAGE_KEY = 'milanote_elements_db';
-
-try {
-  const stored = localStorage.getItem(LOCAL_STORAGE_KEY);
-  if (stored) {
-    inMemoryElements = JSON.parse(stored);
+const getRootBoardId = async (): Promise<string> => {
+  if (rootBoardIdCache) return rootBoardIdCache;
+  const boards = await invoke<Board[]>('list_boards', { parentId: null });
+  if (boards.length > 0) {
+    rootBoardIdCache = boards[0].id;
+    return rootBoardIdCache;
   }
-} catch (e) {
-  console.error("Failed to load elements from localStorage", e);
-}
-
-const saveDb = () => {
-  try {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(inMemoryElements));
-  } catch (e) {
-    console.error("Failed to save elements to localStorage", e);
-  }
+  throw new Error("No root board found");
 };
 
-export const searchBoards = async (_query: string) => {
-  return Promise.resolve([]);
+const resolveBoardId = async (boardId: string): Promise<string> => {
+  if (boardId === 'root-board') return await getRootBoardId();
+  return boardId;
+};
+
+export const searchBoards = async (query: string): Promise<SearchResult[]> => {
+  return await invoke<SearchResult[]>('search_boards', { query });
 };
 
 export const ipcService = {
   getElementsForBoard: async (boardId: string): Promise<Element[]> => {
-    return Promise.resolve(inMemoryElements.filter((el) => el.board_id === boardId));
+    const resolvedId = await resolveBoardId(boardId);
+    return await invoke<Element[]>('get_board_elements', { boardId: resolvedId });
   },
   syncBoardState: async (boardId: string, elements: Element[]): Promise<void> => {
-    inMemoryElements = [
-      ...inMemoryElements.filter((el) => el.board_id !== boardId),
-      ...elements
-    ];
-    saveDb();
-    return Promise.resolve();
+    const resolvedId = await resolveBoardId(boardId);
+    await invoke('sync_board_state', { boardId: resolvedId, elements });
   },
   createElement: async (elementData: Omit<Element, 'id' | 'created_at' | 'updated_at'>): Promise<Element> => {
     const newElement: Element = {
       ...elementData,
-      id: `el-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      id: crypto.randomUUID(),
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
-    inMemoryElements.push(newElement);
-    saveDb();
-    return Promise.resolve(newElement);
+    newElement.board_id = await resolveBoardId(newElement.board_id);
+    await invoke('create_element', { element: newElement });
+    return newElement;
   },
   batchUpdateElementPositions: async (updates: ElementPositionUpdate[]): Promise<void> => {
-    inMemoryElements = inMemoryElements.map((el) => {
-      const update = updates.find((u) => u.id === el.id);
-      return update ? { ...el, ...update } : el;
-    });
-    saveDb();
-    return Promise.resolve();
+    await invoke('update_element_positions', { updates });
   },
   updateElementContent: async (id: string, content: Record<string, any>): Promise<void> => {
-    inMemoryElements = inMemoryElements.map((el) => (el.id === id ? { ...el, content } : el));
-    saveDb();
-    return Promise.resolve();
+    await invoke('update_element_content', { id, content });
   },
   updateElementStyle: async (id: string, style: Record<string, any>): Promise<void> => {
-    inMemoryElements = inMemoryElements.map((el) => (el.id === id ? { ...el, style } : el));
-    saveDb();
-    return Promise.resolve();
+    await invoke('update_element_style', { id, style });
   },
   updateElementBoardId: async (id: string, board_id: string): Promise<void> => {
-    inMemoryElements = inMemoryElements.map((el) => (el.id === id ? { ...el, board_id } : el));
-    saveDb();
-    return Promise.resolve();
+    const resolvedId = await resolveBoardId(board_id);
+    await invoke('update_element_board_id', { id, boardId: resolvedId });
   },
   deleteElement: async (id: string): Promise<void> => {
-    inMemoryElements = inMemoryElements.filter((el) => el.id !== id);
-    saveDb();
-    return Promise.resolve();
+    await invoke('delete_element', { id });
   },
   searchElements: async (_query: string) => {
     return Promise.resolve([]);
   },
-  search: async (_query: string) => {
-    return Promise.resolve([]);
+  search: async (query: string) => {
+    return await searchBoards(query);
   }
 };
 

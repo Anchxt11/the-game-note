@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "antigravity-milanote",
+  "productName": "GameNote",
   "version": "0.1.0",
-  "identifier": "com.antigravity.milanote",
+  "identifier": "com.anchit.gameNote",
   "build": {
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Antigravity Milanote",
+        "title": "Game-Note",
         "width": 1280,
         "height": 800,
         "minWidth": 800,

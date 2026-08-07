@@ -375,6 +375,34 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_element_style(
+        &self,
+        id: &Uuid,
+        style: Option<&JsonValue>,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now();
+        conn.execute(
+            "UPDATE elements SET style = ?1, updated_at = ?2 WHERE id = ?3",
+            params![style, now, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_element_board_id(
+        &self,
+        id: &Uuid,
+        board_id: &Uuid,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now();
+        conn.execute(
+            "UPDATE elements SET board_id = ?1, updated_at = ?2 WHERE id = ?3",
+            params![board_id, now, id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_element(&self, id: &Uuid) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let affected = conn.execute("DELETE FROM elements WHERE id = ?1", params![id])?;
