@@ -1,42 +1,39 @@
 mod commands;
 
 use milanote_core::{seed::seed_demo_data, Database};
-use std::env;
+use tauri::Manager;
 
 fn main() {
-    println!("Antigravity Milanote - Linux Native Desktop App");
-    let args: Vec<String> = env::args().collect();
-    if args.iter().any(|arg| arg == "--seed" || arg == "seed") {
-        println!("Initializing local database and populating seed demo board...");
-        match Database::open_default() {
-            Ok(db) => match seed_demo_data(&db) {
-                Ok(board) => println!("Successfully seeded board '{}' (ID: {}) with demo elements!", board.title, board.id),
-                Err(e) => eprintln!("Failed to seed demo data: {}", e),
-            },
-            Err(e) => eprintln!("Failed to open default database: {}", e),
-        }
-        return;
-    }
-
-    let db = match Database::open_default() {
-        Ok(db) => db,
-        Err(e) => {
-            eprintln!("Fatal error opening database: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    // Ensure demo seed data exists if the board list is empty on startup
-    if let Ok(boards) = db.list_boards(None) {
-        if boards.is_empty() {
-            println!("No boards found in local database. Generating default Welcome board...");
-            let _ = seed_demo_data(&db);
-        }
-    }
-
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .manage(db)
+        .setup(|app| {
+            // Use Tauri's own path resolver so the DB lands inside
+            // ~/.local/share/com.anchit.gameNote/ alongside the WebView data.
+            let app_data_dir = app
+                .path()
+                .app_data_dir()
+                .expect("Failed to resolve app data directory");
+
+            std::fs::create_dir_all(&app_data_dir)
+                .expect("Failed to create app data directory");
+
+            let db_path = app_data_dir.join("milanote.db");
+            println!("Opening database at: {}", db_path.display());
+
+            let db = Database::open_path(&db_path)
+                .expect("Fatal: failed to open SQLite database");
+
+            // Seed demo data on first launch (empty database).
+            if let Ok(boards) = db.list_boards(None) {
+                if boards.is_empty() {
+                    println!("No boards found — seeding demo data...");
+                    let _ = seed_demo_data(&db);
+                }
+            }
+
+            app.manage(db);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::list_boards,
             commands::get_board_tree,
