@@ -11,7 +11,7 @@ pub struct FileStorage {
 
 impl FileStorage {
     pub fn open_default() -> Result<Self> {
-        let proj_dirs = ProjectDirs::from("com", "antigravity", "milanote")
+        let proj_dirs = ProjectDirs::from("com", "anchit", "gameNote")
             .ok_or_else(|| AppError::InvalidOperation("Failed to determine project data directory".into()))?;
         let root_dir = proj_dirs.data_dir().join("files");
         fs::create_dir_all(&root_dir)?;

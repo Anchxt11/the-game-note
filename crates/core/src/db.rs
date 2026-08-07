@@ -17,7 +17,7 @@ pub struct Database {
 
 impl Database {
     pub fn open_default() -> Result<Self> {
-        let proj_dirs = ProjectDirs::from("com", "antigravity", "milanote")
+        let proj_dirs = ProjectDirs::from("com", "anchit", "gameNote")
             .ok_or_else(|| AppError::InvalidOperation("Failed to determine project data directory".into()))?;
         
         let data_dir = proj_dirs.data_dir();

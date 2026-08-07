@@ -26,6 +26,7 @@ pub enum ElementType {
     NestedBoard,
     Comment,
     Table,
+    Line,
 }
 
 impl ElementType {
@@ -41,6 +42,7 @@ impl ElementType {
             Self::NestedBoard => "nested_board",
             Self::Comment => "comment",
             Self::Table => "table",
+            Self::Line => "line",
         }
     }
 
@@ -56,6 +58,7 @@ impl ElementType {
             "nested_board" => Some(Self::NestedBoard),
             "comment" => Some(Self::Comment),
             "table" => Some(Self::Table),
+            "line" => Some(Self::Line),
             _ => None,
         }
     }
