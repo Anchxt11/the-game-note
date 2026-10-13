@@ -643,9 +643,11 @@ export const Canvas: React.FC<CanvasProps> = ({
     axis: 'h' | 'v';
     startMouse: number;
     startPan: number;
-    trackLength: number;
-    contentSpan: number;
+    availableTrack: number;
+    maxPanTravel: number;
   } | null>(null);
+  const scrollbarRafRef = useRef<number | null>(null);
+  const pendingScrollbarPanRef = useRef<{ x?: number; y?: number } | null>(null);
   const dragRafRef = useRef<number | null>(null);
   const [dragOverColumnId, setDragOverColumnId] = useState<string | null>(null);
   const [dragOverTaskListId, setDragOverTaskListId] = useState<string | null>(null);
@@ -755,47 +757,37 @@ export const Canvas: React.FC<CanvasProps> = ({
   }, [pan.x, pan.y, scale]);
 
   const getPanLimits = useCallback((vpWidth: number, vpHeight: number, currentScale: number) => {
-    let minX = 0;
-    let maxX = 800;
-    let minY = 0;
-    let maxY = 600;
+    const vpCanvasW = vpWidth / currentScale;
+    const vpCanvasH = vpHeight / currentScale;
 
     const activeEls = elements.filter(el => !el.style?.is_unsorted && !el.style?.parent_column_id);
-    if (activeEls.length === 0) {
-      minX = -300;
-      maxX = 1200;
-      minY = -200;
-      maxY = 900;
-    } else {
-      let eMinX = Infinity, eMaxX = -Infinity, eMinY = Infinity, eMaxY = -Infinity;
+    let minElX = Infinity, maxElX = -Infinity, minElY = Infinity, maxElY = -Infinity;
+    if (activeEls.length > 0) {
       activeEls.forEach(el => {
         const w = el.width || (el.element_type === 'nested_board' ? 80 : 340);
         const h = el.height || (el.element_type === 'nested_board' ? 100 : 60);
-        if (el.x < eMinX) eMinX = el.x;
-        if (el.x + w > eMaxX) eMaxX = el.x + w;
-        if (el.y < eMinY) eMinY = el.y;
-        if (el.y + h > eMaxY) eMaxY = el.y + h;
+        if (el.x < minElX) minElX = el.x;
+        if (el.x + w > maxElX) maxElX = el.x + w;
+        if (el.y < minElY) minElY = el.y;
+        if (el.y + h > maxElY) maxElY = el.y + h;
       });
-      const MARGIN_X = 500;
-      const MARGIN_Y = 400;
-      minX = eMinX - MARGIN_X;
-      maxX = eMaxX + MARGIN_X;
-      minY = eMinY - MARGIN_Y;
-      maxY = eMaxY + MARGIN_Y;
     }
 
-    const vpCanvasW = vpWidth / currentScale;
-    const vpCanvasH = vpHeight / currentScale;
-    if (maxX - minX < vpCanvasW + 400) {
-      const midX = (minX + maxX) / 2;
-      minX = midX - (vpCanvasW + 400) / 2;
-      maxX = midX + (vpCanvasW + 400) / 2;
-    }
-    if (maxY - minY < vpCanvasH + 400) {
-      const midY = (minY + maxY) / 2;
-      minY = midY - (vpCanvasH + 400) / 2;
-      maxY = midY + (vpCanvasH + 400) / 2;
-    }
+    const HEADROOM = 400;
+
+    // Anchor canonical origin (0, 0); only expand into negative space if elements are placed there
+    const minX = Math.min(0, minElX < Infinity ? minElX - 100 : 0);
+    const minY = Math.min(0, minElY < Infinity ? minElY - 100 : 0);
+
+    // Canvas extents are at least the viewport canvas size, expanding outward as elements extend
+    const maxX = Math.max(
+      vpCanvasW,
+      (maxElX > -Infinity ? maxElX : 0) + HEADROOM
+    );
+    const maxY = Math.max(
+      vpCanvasH,
+      (maxElY > -Infinity ? maxElY : 0) + HEADROOM
+    );
 
     const maxPanX = -minX * currentScale;
     const minPanX = vpWidth - maxX * currentScale;
@@ -836,29 +828,35 @@ export const Canvas: React.FC<CanvasProps> = ({
     const rect = containerRef.current.getBoundingClientRect();
     const { bounds } = getPanLimits(rect.width, rect.height, scale);
     
-    const totalContentW = Math.max(bounds.maxX - bounds.minX, 1);
     const vpW = rect.width / scale;
-    const currentLeft = -pan.x / scale;
-    const progressX = totalContentW > vpW 
-      ? Math.max(0, Math.min(1, (currentLeft - bounds.minX) / (totalContentW - vpW)))
-      : 0;
-    const thumbWidthRatio = Math.max(0.06, Math.min(1, vpW / totalContentW));
-    const thumbLeftPct = progressX * (1 - thumbWidthRatio) * 100;
-    const thumbWidthPct = thumbWidthRatio * 100;
-
-    const totalContentH = Math.max(bounds.maxY - bounds.minY, 1);
     const vpH = rect.height / scale;
+    const totalContentW = Math.max(bounds.maxX - bounds.minX, vpW);
+    const totalContentH = Math.max(bounds.maxY - bounds.minY, vpH);
+    const maxScrollX = totalContentW - vpW;
+    const maxScrollY = totalContentH - vpH;
+
+    const currentLeft = -pan.x / scale;
     const currentTop = -pan.y / scale;
-    const progressY = totalContentH > vpH
-      ? Math.max(0, Math.min(1, (currentTop - bounds.minY) / (totalContentH - vpH)))
+
+    const progressX = maxScrollX > 1 
+      ? Math.max(0, Math.min(1, (currentLeft - bounds.minX) / maxScrollX))
       : 0;
-    const thumbHeightRatio = Math.max(0.06, Math.min(1, vpH / totalContentH));
-    const thumbTopPct = progressY * (1 - thumbHeightRatio) * 100;
-    const thumbHeightPct = thumbHeightRatio * 100;
+    const progressY = maxScrollY > 1
+      ? Math.max(0, Math.min(1, (currentTop - bounds.minY) / maxScrollY))
+      : 0;
+
+    const thumbRatioX = Math.max(0.05, Math.min(1, vpW / totalContentW));
+    const thumbRatioY = Math.max(0.05, Math.min(1, vpH / totalContentH));
+
+    const thumbWidthPct = thumbRatioX * 100;
+    const thumbLeftPct = progressX * (1 - thumbRatioX) * 100;
+
+    const thumbHeightPct = thumbRatioY * 100;
+    const thumbTopPct = progressY * (1 - thumbRatioY) * 100;
 
     return {
-      showH: thumbWidthRatio < 0.98,
-      showV: thumbHeightRatio < 0.98,
+      showH: maxScrollX > 20,
+      showV: maxScrollY > 20,
       thumbLeftPct,
       thumbWidthPct,
       thumbTopPct,
@@ -871,28 +869,60 @@ export const Canvas: React.FC<CanvasProps> = ({
     e.preventDefault();
     if (!containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
-    const { bounds } = getPanLimits(rect.width, rect.height, scale);
+    const { bounds, panLimits } = getPanLimits(rect.width, rect.height, scale);
 
     if (axis === 'h') {
-      const trackWidth = rect.width - 16;
+      const trackLength = rect.width - 6;
+      const totalContentW = Math.max(bounds.maxX - bounds.minX, rect.width / scale);
+      const thumbRatioX = Math.max(0.05, Math.min(1, (rect.width / scale) / totalContentW));
+      const thumbLength = Math.max(thumbRatioX * trackLength, 20);
+      const availableTrack = Math.max(trackLength - thumbLength, 1);
+      const maxPanTravel = panLimits.maxPanX - panLimits.minPanX;
+
+      const isThumb = (e.target as HTMLElement).classList.contains('canvas-scrollbar-thumb');
+      let startPan = pan.x;
+      if (!isThumb) {
+        const trackRect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+        const clickOffset = e.clientX - trackRect.left - thumbLength / 2;
+        const targetProgress = Math.max(0, Math.min(1, clickOffset / availableTrack));
+        startPan = clampPan(panLimits.maxPanX - targetProgress * maxPanTravel, pan.y).x;
+        setPan((prev) => ({ ...prev, x: startPan }));
+      }
+
       scrollbarDragRef.current = {
         axis: 'h',
         startMouse: e.clientX,
-        startPan: pan.x,
-        trackLength: Math.max(trackWidth, 100),
-        contentSpan: (bounds.maxX - bounds.minX) * scale,
+        startPan,
+        availableTrack,
+        maxPanTravel,
       };
     } else {
-      const trackHeight = rect.height - 16;
+      const trackLength = rect.height - 6;
+      const totalContentH = Math.max(bounds.maxY - bounds.minY, rect.height / scale);
+      const thumbRatioY = Math.max(0.05, Math.min(1, (rect.height / scale) / totalContentH));
+      const thumbLength = Math.max(thumbRatioY * trackLength, 20);
+      const availableTrack = Math.max(trackLength - thumbLength, 1);
+      const maxPanTravel = panLimits.maxPanY - panLimits.minPanY;
+
+      const isThumb = (e.target as HTMLElement).classList.contains('canvas-scrollbar-thumb');
+      let startPan = pan.y;
+      if (!isThumb) {
+        const trackRect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+        const clickOffset = e.clientY - trackRect.top - thumbLength / 2;
+        const targetProgress = Math.max(0, Math.min(1, clickOffset / availableTrack));
+        startPan = clampPan(pan.x, panLimits.maxPanY - targetProgress * maxPanTravel).y;
+        setPan((prev) => ({ ...prev, y: startPan }));
+      }
+
       scrollbarDragRef.current = {
         axis: 'v',
         startMouse: e.clientY,
-        startPan: pan.y,
-        trackLength: Math.max(trackHeight, 100),
-        contentSpan: (bounds.maxY - bounds.minY) * scale,
+        startPan,
+        availableTrack,
+        maxPanTravel,
       };
     }
-  }, [getPanLimits, pan.x, pan.y, scale]);
+  }, [getPanLimits, pan.x, pan.y, scale, clampPan]);
 
   const computeLineEndpoint = useCallback((lineEl: Element, content: Record<string, any>, isStart: boolean) => {
     const targetId = isStart ? content.start_target_id : content.end_target_id;
@@ -1057,7 +1087,7 @@ export const Canvas: React.FC<CanvasProps> = ({
     if (target === containerRef.current || target.classList.contains('canvas-viewport') || target.classList.contains('canvas-plane') || target.classList.contains('canvas-viewport-grid')) {
       e.preventDefault();
       const pos = screenToCanvas(e.clientX, e.clientY);
-      onDropTool('note', Math.round(pos.x - 170), Math.round(pos.y - 30));
+      onDropTool('note', Math.round(pos.x - 20), Math.round(pos.y - 20));
     }
   };
 
@@ -1285,7 +1315,14 @@ export const Canvas: React.FC<CanvasProps> = ({
 
   const handleMouseMove = useCallback((e: MouseEvent) => {
     if (e.buttons === 0 && (selectionRef.current || dragRef.current || lineHandleDragRef.current || headerResizeRef.current || isPanning || scrollbarDragRef.current)) {
-      if (scrollbarDragRef.current) scrollbarDragRef.current = null;
+      if (scrollbarDragRef.current) {
+        scrollbarDragRef.current = null;
+        if (scrollbarRafRef.current !== null) {
+          cancelAnimationFrame(scrollbarRafRef.current);
+          scrollbarRafRef.current = null;
+        }
+        pendingScrollbarPanRef.current = null;
+      }
       if (selectionRef.current) {
         selectionRef.current = null;
         setSelectionBox(null);
@@ -1310,17 +1347,26 @@ export const Canvas: React.FC<CanvasProps> = ({
       return;
     }
     if (scrollbarDragRef.current) {
-      const { axis, startMouse, startPan, trackLength, contentSpan } = scrollbarDragRef.current;
+      const { axis, startMouse, startPan, availableTrack, maxPanTravel } = scrollbarDragRef.current;
       if (axis === 'h') {
         const mouseDelta = e.clientX - startMouse;
-        const ratio = mouseDelta / trackLength;
-        const panDelta = ratio * contentSpan;
-        setPan((prev) => clampPan(startPan - panDelta, prev.y));
+        const panDelta = (mouseDelta / availableTrack) * maxPanTravel;
+        pendingScrollbarPanRef.current = { x: startPan - panDelta };
       } else {
         const mouseDelta = e.clientY - startMouse;
-        const ratio = mouseDelta / trackLength;
-        const panDelta = ratio * contentSpan;
-        setPan((prev) => clampPan(prev.x, startPan - panDelta));
+        const panDelta = (mouseDelta / availableTrack) * maxPanTravel;
+        pendingScrollbarPanRef.current = { y: startPan - panDelta };
+      }
+
+      if (scrollbarRafRef.current === null) {
+        scrollbarRafRef.current = requestAnimationFrame(() => {
+          scrollbarRafRef.current = null;
+          if (pendingScrollbarPanRef.current) {
+            const p = pendingScrollbarPanRef.current;
+            pendingScrollbarPanRef.current = null;
+            setPan((prev) => clampPan(p.x !== undefined ? p.x : prev.x, p.y !== undefined ? p.y : prev.y));
+          }
+        });
       }
       return;
     }
@@ -1745,6 +1791,11 @@ export const Canvas: React.FC<CanvasProps> = ({
     if (scrollbarDragRef.current) {
       scrollbarDragRef.current = null;
     }
+    if (scrollbarRafRef.current !== null) {
+      cancelAnimationFrame(scrollbarRafRef.current);
+      scrollbarRafRef.current = null;
+    }
+    pendingScrollbarPanRef.current = null;
     if (dragRafRef.current !== null) {
       cancelAnimationFrame(dragRafRef.current);
       dragRafRef.current = null;
@@ -2043,6 +2094,10 @@ export const Canvas: React.FC<CanvasProps> = ({
         cancelAnimationFrame(dragRafRef.current);
         dragRafRef.current = null;
       }
+      if (scrollbarRafRef.current !== null) {
+        cancelAnimationFrame(scrollbarRafRef.current);
+        scrollbarRafRef.current = null;
+      }
     };
   }, [handleMouseMove, handleMouseUp, setLineDragPreview, onContentChange]);
 
@@ -2227,7 +2282,8 @@ export const Canvas: React.FC<CanvasProps> = ({
     if (!toolId) return;
 
     const canvasPos = screenToCanvas(e.clientX, e.clientY);
-    onDropTool(toolId, Math.round(canvasPos.x - 140), Math.round(canvasPos.y - 30), undefined, false, targetBoardId);
+    const offset = toolId === 'nested_board' ? 40 : 20;
+    onDropTool(toolId, Math.round(canvasPos.x - offset), Math.round(canvasPos.y - offset), undefined, false, targetBoardId);
   };
 
   const handleColumnDrop = (e: React.DragEvent, columnId: string) => {

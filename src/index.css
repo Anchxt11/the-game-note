@@ -3747,34 +3747,66 @@ body, html, #root {
   position: absolute;
   bottom: 0;
   left: 0;
-  right: 10px;
-  height: 8px;
-  background: rgba(0, 0, 0, 0.2);
+  right: 6px;
+  height: 6px;
+  background: transparent;
+  border-radius: 0 !important;
   z-index: 9999;
   cursor: pointer;
   user-select: none;
+  transition: background 0.15s ease;
+}
+
+.canvas-scrollbar-h:hover {
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .canvas-scrollbar-v {
   position: absolute;
   top: 0;
   right: 0;
-  bottom: 10px;
-  width: 8px;
-  background: rgba(0, 0, 0, 0.2);
+  bottom: 6px;
+  width: 6px;
+  background: transparent;
+  border-radius: 0 !important;
   z-index: 9999;
   cursor: pointer;
   user-select: none;
+  transition: background 0.15s ease;
+}
+
+.canvas-scrollbar-v:hover {
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .canvas-scrollbar-thumb {
   position: absolute;
-  background: rgba(255, 255, 255, 0.25);
-  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 0 !important;
   transition: background 0.15s ease;
 }
 
 .canvas-scrollbar-thumb:hover,
 .canvas-scrollbar-thumb.dragging {
-  background: rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.38);
 }
+
+/* Global scrollbars for drawers and panels - subtle and non-rounded */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 0 !important;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.38);
+}
+
