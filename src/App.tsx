@@ -38,6 +38,7 @@ export const App: React.FC = () => {
   const [editingElementId, setEditingElementId] = useState<string | null>(null);
   const [renamingLinkId, setRenamingLinkId] = useState<string | null>(null);
   const [canvasScale, setCanvasScale] = useState<number>(1.0);
+  const [canvasCenter, setCanvasCenter] = useState<{ x: number; y: number }>({ x: 500, y: 350 });
   const [isUnsortedDrawerOpen, setIsUnsortedDrawerOpen] = useState(false);
   const [selectedTableCells, setSelectedTableCells] = useState<{ tableId: string; cellIndices: number[] } | null>(null);
   const pendingUnsortedBoardsRef = useRef<Set<string>>(new Set());
@@ -749,6 +750,16 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleSelectTool = (tool: ToolType) => {
+    setActiveTool(tool);
+    if (tool !== 'select') {
+      const offsetW = tool === 'nested_board' ? 40 : 170;
+      const offsetH = tool === 'nested_board' ? 50 : 30;
+      handleDropTool(tool, Math.round(canvasCenter.x - offsetW), Math.round(canvasCenter.y - offsetH));
+      setActiveTool('select');
+    }
+  };
+
   const handleCreateTaskListFromItem = async (x: number, y: number, item: any, targetColumnId?: string) => {
     recordHistory(elements);
     const newEl = await ipcService.createElement({
@@ -1279,7 +1290,7 @@ export const App: React.FC = () => {
         ) : !isPresentationMode ? (
           <Toolbar
             activeTool={activeTool}
-            onSelectTool={setActiveTool}
+            onSelectTool={handleSelectTool}
             isDraggingElement={isElementBeingDragged}
             isHoveringTrash={isHoveringTrash}
             onTrashDrop={() => handleDelete()}
@@ -1346,6 +1357,7 @@ export const App: React.FC = () => {
           onDragChange={setIsElementBeingDragged}
           scale={canvasScale}
           onSetScale={setCanvasScale}
+          onViewportChange={(vp) => setCanvasCenter({ x: vp.centerCanvasX, y: vp.centerCanvasY })}
         />
 
               {/* FLOATING TOP-RIGHT UNSORTED PILL BUTTON */}
