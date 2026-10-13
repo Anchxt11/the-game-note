@@ -373,12 +373,13 @@ export interface CanvasProps {
   onUnsortedReorder?: (sourceId: string, targetId: string) => void;
   onHoverBoard?: (boardId: string | null) => void;
   isPresentationMode?: boolean;
-  onDropTool: (tool: ToolType, x: number, y: number, targetColumnId?: string, isUnsorted?: boolean) => void;
+  onDropTool: (tool: ToolType, x: number, y: number, targetColumnId?: string, isUnsorted?: boolean, targetBoardId?: string) => void;
   onCreateTaskListFromItem?: (x: number, y: number, item: any, targetColumnId?: string) => void;
   onCreateQuickLine?: (sourceElementId: string) => Promise<string | undefined>;
   onDeleteElement?: (id: string) => void;
   onSetHoveringTrash?: (isHovering: boolean) => void;
   isHoveringTrash?: boolean;
+  onDragChange?: (isDragging: boolean) => void;
   scale: number;
   onSetScale: (scale: number) => void;
 }
@@ -630,6 +631,7 @@ export const Canvas: React.FC<CanvasProps> = ({
   onDeleteElement = () => {},
   onSetHoveringTrash = () => {},
   isHoveringTrash = false,
+  onDragChange,
   scale,
   onSetScale,
 }) => {
@@ -637,6 +639,14 @@ export const Canvas: React.FC<CanvasProps> = ({
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
   const panStartRef = useRef({ x: 0, y: 0, startPanX: 0, startPanY: 0 });
+  const scrollbarDragRef = useRef<{
+    axis: 'h' | 'v';
+    startMouse: number;
+    startPan: number;
+    trackLength: number;
+    contentSpan: number;
+  } | null>(null);
+  const dragRafRef = useRef<number | null>(null);
   const [dragOverColumnId, setDragOverColumnId] = useState<string | null>(null);
   const [dragOverTaskListId, setDragOverTaskListId] = useState<string | null>(null);
   const [isHoveringUnsorted, setIsHoveringUnsorted] = useState(false);
@@ -662,6 +672,12 @@ export const Canvas: React.FC<CanvasProps> = ({
     isFromColumn?: boolean;
     origColumnId?: string | null;
     hasExceededThreshold?: boolean;
+    targetDx: number;
+    targetDy: number;
+    currentDx: number;
+    currentDy: number;
+    clientX: number;
+    clientY: number;
     dragGroup: Array<{ id: string; origX: number; origY: number; currentX?: number; currentY?: number; origWidth: number; origHeight: number; zIndex: number; isColumn?: boolean; isFromColumn?: boolean; elementType?: string; isVideoLink?: boolean }>;
   } | null>(null);
 
@@ -737,6 +753,146 @@ export const Canvas: React.FC<CanvasProps> = ({
     const y = canvasY * scale + pan.y + rect.top;
     return { x, y };
   }, [pan.x, pan.y, scale]);
+
+  const getPanLimits = useCallback((vpWidth: number, vpHeight: number, currentScale: number) => {
+    let minX = 0;
+    let maxX = 800;
+    let minY = 0;
+    let maxY = 600;
+
+    const activeEls = elements.filter(el => !el.style?.is_unsorted && !el.style?.parent_column_id);
+    if (activeEls.length === 0) {
+      minX = -300;
+      maxX = 1200;
+      minY = -200;
+      maxY = 900;
+    } else {
+      let eMinX = Infinity, eMaxX = -Infinity, eMinY = Infinity, eMaxY = -Infinity;
+      activeEls.forEach(el => {
+        const w = el.width || (el.element_type === 'nested_board' ? 80 : 340);
+        const h = el.height || (el.element_type === 'nested_board' ? 100 : 60);
+        if (el.x < eMinX) eMinX = el.x;
+        if (el.x + w > eMaxX) eMaxX = el.x + w;
+        if (el.y < eMinY) eMinY = el.y;
+        if (el.y + h > eMaxY) eMaxY = el.y + h;
+      });
+      const MARGIN_X = 500;
+      const MARGIN_Y = 400;
+      minX = eMinX - MARGIN_X;
+      maxX = eMaxX + MARGIN_X;
+      minY = eMinY - MARGIN_Y;
+      maxY = eMaxY + MARGIN_Y;
+    }
+
+    const vpCanvasW = vpWidth / currentScale;
+    const vpCanvasH = vpHeight / currentScale;
+    if (maxX - minX < vpCanvasW + 400) {
+      const midX = (minX + maxX) / 2;
+      minX = midX - (vpCanvasW + 400) / 2;
+      maxX = midX + (vpCanvasW + 400) / 2;
+    }
+    if (maxY - minY < vpCanvasH + 400) {
+      const midY = (minY + maxY) / 2;
+      minY = midY - (vpCanvasH + 400) / 2;
+      maxY = midY + (vpCanvasH + 400) / 2;
+    }
+
+    const maxPanX = -minX * currentScale;
+    const minPanX = vpWidth - maxX * currentScale;
+    const maxPanY = -minY * currentScale;
+    const minPanY = vpHeight - maxY * currentScale;
+
+    return {
+      bounds: { minX, maxX, minY, maxY },
+      panLimits: {
+        minPanX: Math.min(minPanX, maxPanX),
+        maxPanX: Math.max(minPanX, maxPanX),
+        minPanY: Math.min(minPanY, maxPanY),
+        maxPanY: Math.max(minPanY, maxPanY),
+      }
+    };
+  }, [elements]);
+
+  const clampPan = useCallback((x: number, y: number, currentScale = scale) => {
+    if (!containerRef.current) return { x, y };
+    const rect = containerRef.current.getBoundingClientRect();
+    const { panLimits } = getPanLimits(rect.width, rect.height, currentScale);
+    const clampedX = Math.min(Math.max(x, panLimits.minPanX), panLimits.maxPanX);
+    const clampedY = Math.min(Math.max(y, panLimits.minPanY), panLimits.maxPanY);
+    return { x: clampedX, y: clampedY };
+  }, [getPanLimits, scale]);
+
+  const scrollbarMetrics = useMemo(() => {
+    if (!containerRef.current) {
+      return {
+        showH: false,
+        showV: false,
+        thumbLeftPct: 0,
+        thumbWidthPct: 100,
+        thumbTopPct: 0,
+        thumbHeightPct: 100,
+      };
+    }
+    const rect = containerRef.current.getBoundingClientRect();
+    const { bounds } = getPanLimits(rect.width, rect.height, scale);
+    
+    const totalContentW = Math.max(bounds.maxX - bounds.minX, 1);
+    const vpW = rect.width / scale;
+    const currentLeft = -pan.x / scale;
+    const progressX = totalContentW > vpW 
+      ? Math.max(0, Math.min(1, (currentLeft - bounds.minX) / (totalContentW - vpW)))
+      : 0;
+    const thumbWidthRatio = Math.max(0.06, Math.min(1, vpW / totalContentW));
+    const thumbLeftPct = progressX * (1 - thumbWidthRatio) * 100;
+    const thumbWidthPct = thumbWidthRatio * 100;
+
+    const totalContentH = Math.max(bounds.maxY - bounds.minY, 1);
+    const vpH = rect.height / scale;
+    const currentTop = -pan.y / scale;
+    const progressY = totalContentH > vpH
+      ? Math.max(0, Math.min(1, (currentTop - bounds.minY) / (totalContentH - vpH)))
+      : 0;
+    const thumbHeightRatio = Math.max(0.06, Math.min(1, vpH / totalContentH));
+    const thumbTopPct = progressY * (1 - thumbHeightRatio) * 100;
+    const thumbHeightPct = thumbHeightRatio * 100;
+
+    return {
+      showH: thumbWidthRatio < 0.98,
+      showV: thumbHeightRatio < 0.98,
+      thumbLeftPct,
+      thumbWidthPct,
+      thumbTopPct,
+      thumbHeightPct,
+    };
+  }, [getPanLimits, pan.x, pan.y, scale]);
+
+  const handleScrollbarMouseDown = useCallback((axis: 'h' | 'v', e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (!containerRef.current) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    const { bounds } = getPanLimits(rect.width, rect.height, scale);
+
+    if (axis === 'h') {
+      const trackWidth = rect.width - 16;
+      scrollbarDragRef.current = {
+        axis: 'h',
+        startMouse: e.clientX,
+        startPan: pan.x,
+        trackLength: Math.max(trackWidth, 100),
+        contentSpan: (bounds.maxX - bounds.minX) * scale,
+      };
+    } else {
+      const trackHeight = rect.height - 16;
+      scrollbarDragRef.current = {
+        axis: 'v',
+        startMouse: e.clientY,
+        startPan: pan.y,
+        trackLength: Math.max(trackHeight, 100),
+        contentSpan: (bounds.maxY - bounds.minY) * scale,
+      };
+    }
+  }, [getPanLimits, pan.x, pan.y, scale]);
 
   const computeLineEndpoint = useCallback((lineEl: Element, content: Record<string, any>, isStart: boolean) => {
     const targetId = isStart ? content.start_target_id : content.end_target_id;
@@ -861,16 +1017,13 @@ export const Canvas: React.FC<CanvasProps> = ({
         const newPanY = mouseY - (mouseY - pan.y) * scaleRatio;
 
         onSetScale(newScale);
-        setPan({ x: newPanX, y: newPanY });
+        setPan(clampPan(newPanX, newPanY, newScale));
       }
     } else {
       e.preventDefault();
-      setPan((prev) => ({
-        x: prev.x - e.deltaX,
-        y: prev.y - e.deltaY,
-      }));
+      setPan((prev) => clampPan(prev.x - e.deltaX, prev.y - e.deltaY));
     }
-  }, [scale, pan.x, pan.y, onSetScale]);
+  }, [scale, pan.x, pan.y, onSetScale, clampPan]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (activeInlineComment) setActiveInlineComment(null);
@@ -920,8 +1073,219 @@ export const Canvas: React.FC<CanvasProps> = ({
     });
   }, [elements]);
 
+  const checkDragTargets = useCallback((clientX: number, clientY: number, elementId: string, dragGroup: any[]) => {
+    if (clientX <= 75 && clientY >= window.innerHeight - 80) {
+      onSetHoveringTrash(true);
+    } else {
+      onSetHoveringTrash(false);
+    }
+
+    let foundColId: string | null = null;
+    columns.forEach((col) => {
+      if (col.id === elementId) return;
+      const colDiv = document.getElementById(`milanote-el-${col.id}`);
+      if (colDiv) {
+        const rect = colDiv.getBoundingClientRect();
+        if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
+          foundColId = col.id;
+        }
+      }
+    });
+    if (foundColId) {
+      const colChildren = getColumnChildren(foundColId).filter(c => !dragGroup.some(g => g.id === c.id));
+      let targetIdx = colChildren.length;
+      for (let i = 0; i < colChildren.length; i++) {
+        const childDiv = document.getElementById(`milanote-el-${colChildren[i].id}`);
+        if (childDiv) {
+          const rect = childDiv.getBoundingClientRect();
+          const midY = rect.top + rect.height / 2;
+          if (clientY < midY) {
+            targetIdx = i;
+            break;
+          }
+        }
+      }
+      setDropInsertIndex(targetIdx);
+    } else {
+      setDropInsertIndex(null);
+    }
+    setDragOverColumnId(foundColId);
+
+    let foundTaskListId: string | null = null;
+    const draggedEl = elements.find((x) => x.id === elementId);
+    if (draggedEl && draggedEl.element_type === 'task_list') {
+      elements.forEach((other) => {
+        if (other.id === elementId || other.element_type !== 'task_list') return;
+        const tDiv = document.getElementById(`milanote-el-${other.id}`);
+        if (tDiv) {
+          const rect = tDiv.getBoundingClientRect();
+          if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
+            foundTaskListId = other.id;
+          }
+        }
+      });
+    }
+    setDragOverTaskListId(foundTaskListId);
+
+    const unsortedBtn = document.querySelector('.unsorted-pill-btn');
+    const drawerEl = document.querySelector('.unsorted-drawer');
+    let overUnsorted = false;
+    if (unsortedBtn) {
+      const uRect = unsortedBtn.getBoundingClientRect();
+      if (clientX >= uRect.left && clientX <= uRect.right && clientY >= uRect.top && clientY <= uRect.bottom) {
+        overUnsorted = true;
+      }
+    }
+    if (drawerEl) {
+      const dRect = drawerEl.getBoundingClientRect();
+      if (clientX >= dRect.left && clientX <= dRect.right && clientY >= dRect.top && clientY <= dRect.bottom) {
+        overUnsorted = true;
+      }
+    }
+    if (overUnsorted && !isHoveringUnsorted) {
+      setIsHoveringUnsorted(true);
+      if (!hoverUnsortedRef.current && onOpenUnsortedDrawer) {
+        hoverUnsortedRef.current = window.setTimeout(() => {
+          onOpenUnsortedDrawer();
+          hoverUnsortedRef.current = null;
+          setIsHoveringUnsorted(false);
+        }, 500);
+      }
+    } else if (!overUnsorted && isHoveringUnsorted) {
+      setIsHoveringUnsorted(false);
+      if (hoverUnsortedRef.current) {
+        clearTimeout(hoverUnsortedRef.current);
+        hoverUnsortedRef.current = null;
+      }
+    }
+
+    let foundBoardId: string | null = null;
+    elements.forEach((other) => {
+      if (other.id === elementId || other.element_type !== 'nested_board') return;
+      const bDiv = document.getElementById(`milanote-el-${other.id}`);
+      if (bDiv) {
+        const rect = bDiv.getBoundingClientRect();
+        if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
+          foundBoardId = other.content?.target_board_id || other.id;
+        }
+      }
+    });
+    if (!foundBoardId) {
+      const breadcrumbs = document.querySelectorAll('[data-board-id]:not(.active)');
+      breadcrumbs.forEach((bEl) => {
+        const rect = bEl.getBoundingClientRect();
+        if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
+          const bId = bEl.getAttribute('data-board-id');
+          if (bId && bId !== elementId) {
+            foundBoardId = bId;
+          }
+        }
+      });
+    }
+    if (hoveredBoardIdRef.current !== foundBoardId) {
+      hoveredBoardIdRef.current = foundBoardId;
+      setHoveredBoardId(foundBoardId);
+    }
+    if (foundBoardId) {
+      if (hoverEnterBoardRef.current?.boardId !== foundBoardId) {
+        if (hoverEnterBoardRef.current?.timer) clearTimeout(hoverEnterBoardRef.current.timer);
+        const targetId = foundBoardId;
+        const t = setTimeout(() => {
+          if (onMoveElementToBoard && dragRef.current) {
+            const curPos = screenToCanvas(clientX, clientY);
+            const targetX = Math.round(curPos.x - (dragRef.current.offsetX || 0));
+            const targetY = Math.round(curPos.y - (dragRef.current.offsetY || 0));
+            dragRef.current.startX = clientX;
+            dragRef.current.startY = clientY;
+            dragRef.current.dragGroup = dragRef.current.dragGroup.map(g => ({
+              ...g,
+              origX: targetX,
+              origY: targetY
+            }));
+            const isBreadcrumb = !document.querySelector(`#milanote-el-${targetId}`);
+            onMoveElementToBoard(elementId, targetId, targetX, targetY, isBreadcrumb, true);
+          }
+          onOpenBoard(targetId, true);
+          hoveredBoardIdRef.current = null;
+          setHoveredBoardId(null);
+          hoverEnterBoardRef.current = null;
+        }, 1400);
+        hoverEnterBoardRef.current = { boardId: targetId, timer: t };
+      }
+    } else if (hoverEnterBoardRef.current) {
+      if (hoverEnterBoardRef.current.timer) clearTimeout(hoverEnterBoardRef.current.timer);
+      hoverEnterBoardRef.current = null;
+    }
+  }, [columns, getColumnChildren, elements, isHoveringUnsorted, onOpenUnsortedDrawer, onMoveElementToBoard, onOpenBoard, onSetHoveringTrash, screenToCanvas, setDropInsertIndex]);
+
+  const startDragRafLoop = useCallback(() => {
+    if (dragRafRef.current !== null) return;
+
+    const tick = () => {
+      const drag = dragRef.current;
+      if (!drag || drag.isResize || !drag.hasExceededThreshold) {
+        dragRafRef.current = null;
+        return;
+      }
+
+      // Smooth trailing interpolation with an ever-so-slight physical lag wrt cursor (0.32 lerp factor)
+      const LERP_FACTOR = 0.32;
+      drag.currentDx += (drag.targetDx - drag.currentDx) * LERP_FACTOR;
+      drag.currentDy += (drag.targetDy - drag.currentDy) * LERP_FACTOR;
+
+      if (Math.abs(drag.targetDx - drag.currentDx) < 0.1) drag.currentDx = drag.targetDx;
+      if (Math.abs(drag.targetDy - drag.currentDy) < 0.1) drag.currentDy = drag.targetDy;
+
+      drag.dragGroup.forEach((item) => {
+        const elDiv = document.getElementById(`milanote-el-${item.id}`);
+        if (elDiv) {
+          if (drag.isFromColumn && item.id === drag.elementId) {
+            elDiv.style.position = 'fixed';
+            elDiv.style.left = `${drag.clientX - drag.offsetX}px`;
+            elDiv.style.top = `${drag.clientY - drag.offsetY}px`;
+            elDiv.style.zIndex = '999999';
+            elDiv.style.transform = 'none';
+            if (elDiv.classList.contains('column-board-row')) {
+              elDiv.style.width = '240px';
+            } else if (item.elementType === 'image') {
+              elDiv.style.width = `${item.origWidth || 340}px`;
+              elDiv.style.height = `${item.origHeight || 220}px`;
+            }
+          } else {
+            const newX = Math.round(item.origX + drag.currentDx);
+            const newY = Math.round(item.origY + drag.currentDy);
+            item.currentX = newX;
+            item.currentY = newY;
+            elDiv.style.transform = `translate(${newX}px, ${newY}px)`;
+            elDiv.style.left = '0px';
+            elDiv.style.top = '0px';
+            const portalDiv = document.getElementById(`milanote-drag-portal-${item.id}`);
+            if (portalDiv) {
+              const scr = canvasToScreen(newX, newY);
+              portalDiv.style.left = `${scr.x}px`;
+              portalDiv.style.top = `${scr.y}px`;
+              portalDiv.style.transform = `scale(${scale})`;
+            }
+          }
+        }
+      });
+
+      checkDragTargets(drag.clientX, drag.clientY, drag.elementId, drag.dragGroup);
+
+      const stillInterpolating = Math.abs(drag.targetDx - drag.currentDx) >= 0.1 || Math.abs(drag.targetDy - drag.currentDy) >= 0.1;
+      if (dragRef.current || stillInterpolating) {
+        dragRafRef.current = requestAnimationFrame(tick);
+      } else {
+        dragRafRef.current = null;
+      }
+    };
+
+    dragRafRef.current = requestAnimationFrame(tick);
+  }, [canvasToScreen, checkDragTargets, scale]);
+
   const handleMouseMove = useCallback((e: MouseEvent) => {
-    if (e.buttons === 0 && (selectionRef.current || dragRef.current || lineHandleDragRef.current || headerResizeRef.current || isPanning)) {
+    if (e.buttons === 0 && (selectionRef.current || dragRef.current || lineHandleDragRef.current || headerResizeRef.current || isPanning || scrollbarDragRef.current)) {
+      if (scrollbarDragRef.current) scrollbarDragRef.current = null;
       if (selectionRef.current) {
         selectionRef.current = null;
         setSelectionBox(null);
@@ -931,6 +1295,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         setActiveDragId(null);
         setDragOverColumnId(null);
         setDragOverTaskListId(null);
+        onDragChange?.(false);
       }
       if (lineHandleDragRef.current) {
         lineHandleDragRef.current = null;
@@ -944,10 +1309,25 @@ export const Canvas: React.FC<CanvasProps> = ({
       if (isPanning) setIsPanning(false);
       return;
     }
+    if (scrollbarDragRef.current) {
+      const { axis, startMouse, startPan, trackLength, contentSpan } = scrollbarDragRef.current;
+      if (axis === 'h') {
+        const mouseDelta = e.clientX - startMouse;
+        const ratio = mouseDelta / trackLength;
+        const panDelta = ratio * contentSpan;
+        setPan((prev) => clampPan(startPan - panDelta, prev.y));
+      } else {
+        const mouseDelta = e.clientY - startMouse;
+        const ratio = mouseDelta / trackLength;
+        const panDelta = ratio * contentSpan;
+        setPan((prev) => clampPan(prev.x, startPan - panDelta));
+      }
+      return;
+    }
     if (isPanning) {
       const dx = e.clientX - panStartRef.current.x;
       const dy = e.clientY - panStartRef.current.y;
-      setPan({ x: panStartRef.current.startPanX + dx, y: panStartRef.current.startPanY + dy });
+      setPan(clampPan(panStartRef.current.startPanX + dx, panStartRef.current.startPanY + dy));
       return;
     }
 
@@ -1214,7 +1594,10 @@ export const Canvas: React.FC<CanvasProps> = ({
       if (!dragRef.current.hasExceededThreshold && dist < dragThreshold && !isResize) {
         return;
       }
-      dragRef.current.hasExceededThreshold = true;
+      if (!dragRef.current.hasExceededThreshold) {
+        dragRef.current.hasExceededThreshold = true;
+        onDragChange?.(true);
+      }
       if (activeDragId !== elementId) setActiveDragId(elementId);
 
       const dx = (e.clientX - startX) / scale;
@@ -1344,186 +1727,14 @@ export const Canvas: React.FC<CanvasProps> = ({
           }
         }
       } else {
-        if (e.clientX <= 75 && e.clientY >= window.innerHeight - 80) {
-          onSetHoveringTrash(true);
-        } else {
-          onSetHoveringTrash(false);
-        }
-
-        let foundColId: string | null = null;
-        columns.forEach((col) => {
-          if (col.id === elementId) return;
-          const colDiv = document.getElementById(`milanote-el-${col.id}`);
-          if (colDiv) {
-            const rect = colDiv.getBoundingClientRect();
-            if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
-              foundColId = col.id;
-            }
-          }
-        });
-        if (foundColId) {
-          const colChildren = getColumnChildren(foundColId).filter(c => !dragGroup.some(g => g.id === c.id));
-          let targetIdx = colChildren.length;
-          for (let i = 0; i < colChildren.length; i++) {
-            const childDiv = document.getElementById(`milanote-el-${colChildren[i].id}`);
-            if (childDiv) {
-              const rect = childDiv.getBoundingClientRect();
-              const midY = rect.top + rect.height / 2;
-              if (e.clientY < midY) {
-                targetIdx = i;
-                break;
-              }
-            }
-          }
-          setDropInsertIndex(targetIdx);
-        } else {
-          setDropInsertIndex(null);
-        }
-        setDragOverColumnId(foundColId);
-
-        let foundTaskListId: string | null = null;
-        const draggedEl = elements.find((x) => x.id === elementId);
-        if (draggedEl && draggedEl.element_type === 'task_list') {
-          elements.forEach((other) => {
-            if (other.id === elementId || other.element_type !== 'task_list') return;
-            const tDiv = document.getElementById(`milanote-el-${other.id}`);
-            if (tDiv) {
-              const rect = tDiv.getBoundingClientRect();
-              if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
-                foundTaskListId = other.id;
-              }
-            }
-          });
-        }
-        setDragOverTaskListId(foundTaskListId);
-
-        const unsortedBtn = document.querySelector('.unsorted-pill-btn');
-        const drawerEl = document.querySelector('.unsorted-drawer');
-        let overUnsorted = false;
-        if (unsortedBtn) {
-          const uRect = unsortedBtn.getBoundingClientRect();
-          if (e.clientX >= uRect.left && e.clientX <= uRect.right && e.clientY >= uRect.top && e.clientY <= uRect.bottom) {
-            overUnsorted = true;
-          }
-        }
-        if (drawerEl) {
-          const dRect = drawerEl.getBoundingClientRect();
-          if (e.clientX >= dRect.left && e.clientX <= dRect.right && e.clientY >= dRect.top && e.clientY <= dRect.bottom) {
-            overUnsorted = true;
-          }
-        }
-        if (overUnsorted && !isHoveringUnsorted) {
-          setIsHoveringUnsorted(true);
-          if (!hoverUnsortedRef.current && onOpenUnsortedDrawer) {
-            hoverUnsortedRef.current = window.setTimeout(() => {
-              onOpenUnsortedDrawer();
-              hoverUnsortedRef.current = null;
-              setIsHoveringUnsorted(false);
-            }, 500);
-          }
-        } else if (!overUnsorted && isHoveringUnsorted) {
-          setIsHoveringUnsorted(false);
-          if (hoverUnsortedRef.current) {
-            clearTimeout(hoverUnsortedRef.current);
-            hoverUnsortedRef.current = null;
-          }
-        }
-
-        let foundBoardId: string | null = null;
-        elements.forEach((other) => {
-          if (other.id === elementId || other.element_type !== 'nested_board') return;
-          const bDiv = document.getElementById(`milanote-el-${other.id}`);
-          if (bDiv) {
-            const rect = bDiv.getBoundingClientRect();
-            if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
-              foundBoardId = other.id;
-            }
-          }
-        });
-        if (!foundBoardId) {
-          const breadcrumbs = document.querySelectorAll('[data-board-id]:not(.active)');
-          breadcrumbs.forEach((bEl) => {
-            const rect = bEl.getBoundingClientRect();
-            if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
-              const bId = bEl.getAttribute('data-board-id');
-              if (bId && bId !== elementId) {
-                foundBoardId = bId;
-              }
-            }
-          });
-        }
-        if (hoveredBoardIdRef.current !== foundBoardId) {
-          hoveredBoardIdRef.current = foundBoardId;
-          setHoveredBoardId(foundBoardId);
-        }
-        if (foundBoardId) {
-          if (hoverEnterBoardRef.current?.boardId !== foundBoardId) {
-            if (hoverEnterBoardRef.current?.timer) clearTimeout(hoverEnterBoardRef.current.timer);
-            const targetId = foundBoardId;
-            const t = setTimeout(() => {
-              if (onMoveElementToBoard && dragRef.current) {
-                const curPos = screenToCanvas(e.clientX, e.clientY);
-                const targetX = Math.round(curPos.x - (dragRef.current.offsetX || 0));
-                const targetY = Math.round(curPos.y - (dragRef.current.offsetY || 0));
-                dragRef.current.startX = e.clientX;
-                dragRef.current.startY = e.clientY;
-                dragRef.current.dragGroup = dragRef.current.dragGroup.map(g => ({
-                  ...g,
-                  origX: targetX,
-                  origY: targetY
-                }));
-                const isBreadcrumb = !document.querySelector(`#milanote-el-${targetId}`);
-                onMoveElementToBoard(elementId, targetId, targetX, targetY, isBreadcrumb, true);
-              }
-              onOpenBoard(targetId, true);
-              hoveredBoardIdRef.current = null;
-              setHoveredBoardId(null);
-              hoverEnterBoardRef.current = null;
-            }, 1400);
-            hoverEnterBoardRef.current = { boardId: targetId, timer: t };
-          }
-        } else if (hoverEnterBoardRef.current) {
-          if (hoverEnterBoardRef.current.timer) clearTimeout(hoverEnterBoardRef.current.timer);
-          hoverEnterBoardRef.current = null;
-        }
-
-        dragGroup.forEach((item) => {
-          const elDiv = document.getElementById(`milanote-el-${item.id}`);
-          if (elDiv) {
-            if (isFromColumn && item.id === elementId) {
-              elDiv.style.position = 'fixed';
-              elDiv.style.left = `${e.clientX - offsetX}px`;
-              elDiv.style.top = `${e.clientY - offsetY}px`;
-              elDiv.style.zIndex = '999999';
-              elDiv.style.transform = 'none';
-              if (elDiv.classList.contains('column-board-row')) {
-                elDiv.style.width = '240px';
-              } else if (item.elementType === 'image') {
-                elDiv.style.width = `${item.origWidth || 340}px`;
-                elDiv.style.height = `${item.origHeight || 220}px`;
-              }
-            } else {
-              const newX = Math.round(item.origX + dx);
-              const newY = Math.round(item.origY + dy);
-              item.currentX = newX;
-              item.currentY = newY;
-              elDiv.style.transform = `translate(${newX}px, ${newY}px)`;
-              elDiv.style.left = '0px';
-              elDiv.style.top = '0px';
-              const portalDiv = document.getElementById(`milanote-drag-portal-${item.id}`);
-              if (portalDiv) {
-                const scr = canvasToScreen(newX, newY);
-                portalDiv.style.left = `${scr.x}px`;
-                portalDiv.style.top = `${scr.y}px`;
-                portalDiv.style.transform = `scale(${scale})`;
-              }
-            }
-          }
-        });
-        setDragTick((t) => t + 1);
+        dragRef.current.targetDx = dx;
+        dragRef.current.targetDy = dy;
+        dragRef.current.clientX = e.clientX;
+        dragRef.current.clientY = e.clientY;
+        startDragRafLoop();
       }
     }
-  }, [isPanning, scale, screenToCanvas, canvasToScreen, elements, onMultiSelect, onSetHoveringTrash, columns, activeDragId, setLineDragPreview, computeLineEndpoint, onContentChange, headerResize, onMoveElementToBoard, onOpenBoard, isHoveringUnsorted, onOpenUnsortedDrawer]);
+  }, [isPanning, scale, screenToCanvas, canvasToScreen, elements, onMultiSelect, onSetHoveringTrash, columns, activeDragId, setLineDragPreview, computeLineEndpoint, onContentChange, headerResize, onMoveElementToBoard, onOpenBoard, isHoveringUnsorted, onOpenUnsortedDrawer, startDragRafLoop, clampPan, onDragChange]);
 
   const handleMouseUp = useCallback((e: MouseEvent) => {
     if (hoverEnterBoardRef.current?.timer) {
@@ -1531,6 +1742,14 @@ export const Canvas: React.FC<CanvasProps> = ({
       hoverEnterBoardRef.current = null;
     }
     if (hoveredBoardId) setHoveredBoardId(null);
+    if (scrollbarDragRef.current) {
+      scrollbarDragRef.current = null;
+    }
+    if (dragRafRef.current !== null) {
+      cancelAnimationFrame(dragRafRef.current);
+      dragRafRef.current = null;
+    }
+    onDragChange?.(false);
 
     if (lineHandleDragRef.current) {
       if (lineDragPreviewRef.current) {
@@ -1583,11 +1802,12 @@ export const Canvas: React.FC<CanvasProps> = ({
         setActiveDragId(null);
         setDragOverColumnId(null);
         setDragOverTaskListId(null);
+        onDragChange?.(false);
         return;
       }
 
-      const dx = (e.clientX - startX) / scale;
-      const dy = (e.clientY - startY) / scale;
+      const dx = dragRef.current.targetDx !== undefined ? dragRef.current.targetDx : (e.clientX - startX) / scale;
+      const dy = dragRef.current.targetDy !== undefined ? dragRef.current.targetDy : (e.clientY - startY) / scale;
 
       // RESOLVED TELEPORT BUG: Only scrub transforms and fixed coordinates when dragging items OUT of columns!
       // Erasing transform on standard canvas cards destroys their translate3d coordinates and causes jumping/teleporting.
@@ -1653,21 +1873,36 @@ export const Canvas: React.FC<CanvasProps> = ({
         }
       }
 
-      const activeTargetBoardId = hoveredBoardIdRef.current || hoveredBoardId;
+      let activeTargetBoardId = hoveredBoardIdRef.current || hoveredBoardId;
+      if (!activeTargetBoardId && !isResize) {
+        elements.forEach((other) => {
+          if (other.element_type !== 'nested_board') return;
+          if (dragGroup.some(g => g.id === other.id)) return;
+          const bDiv = document.getElementById(`milanote-el-${other.id}`);
+          if (bDiv) {
+            const rect = bDiv.getBoundingClientRect();
+            if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
+              activeTargetBoardId = other.content?.target_board_id || other.id;
+            }
+          }
+        });
+      }
       if (activeTargetBoardId && !isResize && onMoveElementToBoard && dragGroup.length > 0) {
         if (hoverEnterBoardRef.current?.timer) clearTimeout(hoverEnterBoardRef.current.timer);
         hoverEnterBoardRef.current = null;
         const curPos = screenToCanvas(e.clientX, e.clientY);
         const targetX = Math.round(curPos.x - (dragRef.current?.offsetX || 0));
         const targetY = Math.round(curPos.y - (dragRef.current?.offsetY || 0));
-        const isBreadcrumb = !document.querySelector(`#milanote-el-${activeTargetBoardId}`);
+        const targetBoard = activeTargetBoardId;
+        const isBreadcrumb = !document.querySelector(`#milanote-el-${targetBoard}`);
         dragGroup.forEach((item) => {
-          onMoveElementToBoard(item.id, activeTargetBoardId, targetX, targetY, isBreadcrumb, false);
+          onMoveElementToBoard(item.id, targetBoard, targetX, targetY, isBreadcrumb, false);
         });
         hoveredBoardIdRef.current = null;
         setHoveredBoardId(null);
         dragRef.current = null;
         setActiveDragId(null);
+        onDragChange?.(false);
         return;
       }
 
@@ -1715,6 +1950,7 @@ export const Canvas: React.FC<CanvasProps> = ({
           dragRef.current = null;
           setActiveDragId(null);
           onSetHoveringTrash(false);
+          onDragChange?.(false);
           return;
         }
       }
@@ -1724,6 +1960,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         if (item.elementType === 'table') {
           dragRef.current = null;
           setActiveDragId(null);
+          onDragChange?.(false);
           return;
         }
         let newWidth = Math.max(Math.round(item.origWidth + dx), 110);
@@ -1790,8 +2027,9 @@ export const Canvas: React.FC<CanvasProps> = ({
       dragRef.current = null;
       setActiveDragId(null);
       onSetHoveringTrash(false);
+      onDragChange?.(false);
     }
-  }, [isPanning, scale, elements, onUpdateElementPositions, onDeleteElement, onSetHoveringTrash, screenToCanvas, onStyleChange, dragOverColumnId, headerResize, onMoveElementToBoard, hoveredBoardId, onOpenBoard, isHoveringUnsorted, onMoveToUnsorted]);
+  }, [isPanning, scale, elements, onUpdateElementPositions, onDeleteElement, onSetHoveringTrash, screenToCanvas, onStyleChange, dragOverColumnId, headerResize, onMoveElementToBoard, hoveredBoardId, onOpenBoard, isHoveringUnsorted, onMoveToUnsorted, onDragChange]);
 
   useEffect(() => {
     window.addEventListener('mousemove', handleMouseMove as any);
@@ -1801,6 +2039,10 @@ export const Canvas: React.FC<CanvasProps> = ({
       window.removeEventListener('mousemove', handleMouseMove as any);
       window.removeEventListener('mouseup', handleMouseUp as any);
       window.removeEventListener('blur', handleMouseUp as any);
+      if (dragRafRef.current !== null) {
+        cancelAnimationFrame(dragRafRef.current);
+        dragRafRef.current = null;
+      }
     };
   }, [handleMouseMove, handleMouseUp, setLineDragPreview, onContentChange]);
 
@@ -1912,6 +2154,12 @@ export const Canvas: React.FC<CanvasProps> = ({
       isFromColumn,
       origColumnId: element.style?.parent_column_id || null,
       hasExceededThreshold: false,
+      targetDx: 0,
+      targetDy: 0,
+      currentDx: 0,
+      currentDy: 0,
+      clientX: e.clientX,
+      clientY: e.clientY,
       dragGroup,
     };
 
@@ -1955,11 +2203,31 @@ export const Canvas: React.FC<CanvasProps> = ({
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
+    if (hoverEnterBoardRef.current?.timer) {
+      clearTimeout(hoverEnterBoardRef.current.timer);
+      hoverEnterBoardRef.current = null;
+    }
+    let targetBoardId: string | undefined = hoveredBoardIdRef.current || hoveredBoardId || undefined;
+    if (!targetBoardId) {
+      elements.forEach((other) => {
+        if (other.element_type !== 'nested_board') return;
+        const bDiv = document.getElementById(`milanote-el-${other.id}`);
+        if (bDiv) {
+          const rect = bDiv.getBoundingClientRect();
+          if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
+            targetBoardId = other.content?.target_board_id || other.id;
+          }
+        }
+      });
+    }
+    setHoveredBoardId(null);
+    hoveredBoardIdRef.current = null;
+
     const toolId = e.dataTransfer.getData('application/milanote-tool') as ToolType || (window as any).__MILANOTE_DRAGGED_TOOL__;
     if (!toolId) return;
 
     const canvasPos = screenToCanvas(e.clientX, e.clientY);
-    onDropTool(toolId, Math.round(canvasPos.x - 140), Math.round(canvasPos.y - 30));
+    onDropTool(toolId, Math.round(canvasPos.x - 140), Math.round(canvasPos.y - 30), undefined, false, targetBoardId);
   };
 
   const handleColumnDrop = (e: React.DragEvent, columnId: string) => {
@@ -2028,7 +2296,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         return (
           <div
             id={`milanote-el-${el.id}`}
-            className={`column-board-row column-inner-card ${selectedElementId === el.id ? 'selected' : ''} ${activeDragId === el.id ? 'dragging' : ''} ${hoveredBoardId === el.id ? 'hover-enter-target' : ''}`}
+            className={`column-board-row column-inner-card ${selectedElementId === el.id ? 'selected' : ''} ${activeDragId === el.id ? 'dragging' : ''} ${(hoveredBoardId === el.id || (el.content?.target_board_id && hoveredBoardId === el.content.target_board_id)) ? 'hover-enter-target' : ''}`}
             style={activeDragId === el.id && dragRef.current?.hasExceededThreshold ? { zIndex: 999999 } : undefined}
             onMouseDown={(e) => {
               if (customMouseDown) {
@@ -2937,7 +3205,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         <React.Fragment key={el.id}>
           <div
             id={`milanote-el-${el.id}`}
-            className={`board-card-vertical ${isSelected ? 'selected' : ''} ${isDragging ? 'dragging' : ''} ${hoveredBoardId === el.id ? 'hover-enter-target' : ''}`}
+            className={`board-card-vertical ${isSelected ? 'selected' : ''} ${isDragging ? 'dragging' : ''} ${(hoveredBoardId === el.id || (el.content?.target_board_id && hoveredBoardId === el.content.target_board_id)) ? 'hover-enter-target' : ''}`}
             style={{
               transform: `translate(${posX}px, ${posY}px)`,
               position: 'absolute',
@@ -3581,6 +3849,38 @@ export const Canvas: React.FC<CanvasProps> = ({
           />
         );
       })()}
+
+      {/* CANVAS HORIZONTAL & VERTICAL SCROLLBARS */}
+      {scrollbarMetrics.showH && (
+        <div
+          className="canvas-scrollbar-h"
+          onMouseDown={(e) => handleScrollbarMouseDown('h', e)}
+        >
+          <div
+            className={`canvas-scrollbar-thumb ${scrollbarDragRef.current?.axis === 'h' ? 'dragging' : ''}`}
+            style={{
+              left: `${scrollbarMetrics.thumbLeftPct}%`,
+              width: `${scrollbarMetrics.thumbWidthPct}%`,
+              height: '100%',
+            }}
+          />
+        </div>
+      )}
+      {scrollbarMetrics.showV && (
+        <div
+          className="canvas-scrollbar-v"
+          onMouseDown={(e) => handleScrollbarMouseDown('v', e)}
+        >
+          <div
+            className={`canvas-scrollbar-thumb ${scrollbarDragRef.current?.axis === 'v' ? 'dragging' : ''}`}
+            style={{
+              top: `${scrollbarMetrics.thumbTopPct}%`,
+              height: `${scrollbarMetrics.thumbHeightPct}%`,
+              width: '100%',
+            }}
+          />
+        </div>
+      )}
 
       <UnsortedDrawer
         isOpen={Boolean(isUnsortedDrawerOpen)}

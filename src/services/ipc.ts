@@ -69,6 +69,15 @@ export const ipcService = {
     await invoke('delete_element', { id });
   },
 
+  createBoard: async (title: string, parentId?: string | null, colorTheme?: string | null): Promise<Board> => {
+    const resolvedParentId = parentId ? await resolveBoardId(parentId) : null;
+    return await invoke<Board>('create_board', {
+      title,
+      parentId: resolvedParentId,
+      colorTheme: colorTheme || null,
+    });
+  },
+
   searchElements: async (_query: string) => {
     return Promise.resolve([]);
   },

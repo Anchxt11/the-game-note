@@ -294,12 +294,8 @@ body, html, #root {
   position: relative;
   flex-shrink: 0;
   box-shadow: none !important;
-  animation: fade-in-toolbar 0.12s ease-out;
-}
-
-@keyframes fade-in-toolbar {
-  from { opacity: 0; transform: scale(0.98); }
-  to { opacity: 1; transform: scale(1); }
+  transform: translateZ(0);
+  backface-visibility: hidden;
 }
 
 .toolbar-section {
@@ -467,7 +463,8 @@ body, html, #root {
   z-index: 100 !important;
   flex-shrink: 0;
   box-shadow: none !important;
-  animation: fade-in-toolbar 0.12s ease-out;
+  transform: translateZ(0);
+  backface-visibility: hidden;
 }
 
 .sub-sidebar-btn {
@@ -1892,8 +1889,9 @@ body, html, #root {
 }
 
 .milanote-card.image-card-wrapper .note-top-strip-bar {
-  border-top-left-radius: 6px;
-  border-top-right-radius: 6px;
+  border-radius: 0 !important;
+  border-top-left-radius: 0 !important;
+  border-top-right-radius: 0 !important;
 }
 
 .milanote-card.image-card-wrapper.selected .column-image-card,
@@ -2491,8 +2489,9 @@ body, html, #root {
   left: 0;
   right: 0;
   height: 5px;
-  border-top-left-radius: 8px;
-  border-top-right-radius: 8px;
+  border-radius: 0 !important;
+  border-top-left-radius: 0 !important;
+  border-top-right-radius: 0 !important;
   z-index: 5;
 }
 
@@ -3741,4 +3740,41 @@ body, html, #root {
 .color-swatch.highlight-color.active {
   outline: 2px solid #ffffff;
   outline-offset: 1px;
+}
+
+/* CANVAS HORIZONTAL & VERTICAL SCROLLBARS */
+.canvas-scrollbar-h {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 10px;
+  height: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  z-index: 9999;
+  cursor: pointer;
+  user-select: none;
+}
+
+.canvas-scrollbar-v {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 10px;
+  width: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  z-index: 9999;
+  cursor: pointer;
+  user-select: none;
+}
+
+.canvas-scrollbar-thumb {
+  position: absolute;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 4px;
+  transition: background 0.15s ease;
+}
+
+.canvas-scrollbar-thumb:hover,
+.canvas-scrollbar-thumb.dragging {
+  background: rgba(255, 255, 255, 0.5);
 }

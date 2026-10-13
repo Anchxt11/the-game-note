@@ -298,24 +298,27 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [selectedIds, selectedElementId, editingElementId, elements, handleUndo, handleRedo, recordHistory, handleCopy, handleCut, handlePaste, handleSelectAll]);
 
+  const [isElementBeingDragged, setIsElementBeingDragged] = useState(false);
+
   const handleOpenBoard = useCallback((targetBoardId: string, keepSelection: boolean = false) => {
-    const el = elements.find((x) => x.id === targetBoardId);
-    const title = el && el.content ? (el.content.title || 'Sub-Board') : 'Board';
-    setCurrentBoardId(targetBoardId);
+    const el = elements.find((x) => x.id === targetBoardId || x.content?.target_board_id === targetBoardId);
+    const realBoardId = el?.content?.target_board_id || targetBoardId;
+    const title = el?.content?.title || el?.content?.preview_title || 'Board';
+    setCurrentBoardId(realBoardId);
     setBoardHistory((prev) => {
-      if (prev.some(p => p.id === targetBoardId)) {
-        return prev.slice(0, prev.findIndex(p => p.id === targetBoardId) + 1);
+      if (prev.some(p => p.id === realBoardId)) {
+        return prev.slice(0, prev.findIndex(p => p.id === realBoardId) + 1);
       }
-      return [...prev, { id: targetBoardId, title }];
+      return [...prev, { id: realBoardId, title }];
     });
     if (!keepSelection) {
       setSelectedElementId(null);
       setSelectedIds([]);
       setEditingElementId(null);
     }
-    if (pendingUnsortedBoardsRef.current.has(targetBoardId)) {
+    if (pendingUnsortedBoardsRef.current.has(realBoardId)) {
       setIsUnsortedDrawerOpen(true);
-      pendingUnsortedBoardsRef.current.delete(targetBoardId);
+      pendingUnsortedBoardsRef.current.delete(realBoardId);
     } else if (!keepSelection) {
       setIsUnsortedDrawerOpen(false);
     }
@@ -324,20 +327,39 @@ export const App: React.FC = () => {
   const handleMoveElementToBoard = useCallback(async (elementId: string, targetBoardId: string, x?: number, y?: number, isFromBreadcrumb?: boolean, isEnterHover?: boolean) => {
     recordHistory(elements);
     const elToMove = elements.find((el) => el.id === elementId);
+    if (!elToMove) return;
+
+    let resolvedTargetId = targetBoardId;
+    const boardElement = elements.find((el) => (el.id === targetBoardId || el.content?.target_board_id === targetBoardId) && el.element_type === 'nested_board');
+    if (boardElement) {
+      if (boardElement.content?.target_board_id) {
+        resolvedTargetId = boardElement.content.target_board_id;
+      } else {
+        try {
+          const newBoard = await ipcService.createBoard(boardElement.content?.title || 'New Board', currentBoardId);
+          resolvedTargetId = newBoard.id;
+          boardElement.content = { ...boardElement.content, target_board_id: newBoard.id };
+          await ipcService.updateElementContent(boardElement.id, boardElement.content);
+        } catch (err) {
+          console.error('Failed to create board for nested element:', err);
+        }
+      }
+    }
+
     setElements((prev) => prev.filter((el) => el.id !== elementId));
     try {
-      await ipcService.updateElementBoardId(elementId, targetBoardId);
+      await ipcService.updateElementBoardId(elementId, resolvedTargetId);
       if (isEnterHover && x !== undefined && y !== undefined && elToMove) {
         await ipcService.updateElementStyle(elementId, { ...(elToMove.style || {}), is_unsorted: false });
         await ipcService.batchUpdateElementPositions([{ id: elementId, x, y, width: elToMove.width, height: elToMove.height, z_index: elToMove.z_index }]);
       } else if (isFromBreadcrumb && elToMove) {
-        pendingUnsortedBoardsRef.current.add(targetBoardId);
+        pendingUnsortedBoardsRef.current.add(resolvedTargetId);
         await ipcService.updateElementStyle(elementId, { ...(elToMove.style || {}), is_unsorted: true });
       } else if (elToMove) {
-        const targetElements = await ipcService.getElementsForBoard(targetBoardId);
+        const targetElements = await ipcService.getElementsForBoard(resolvedTargetId);
         const hasConflict = targetElements.some((e: any) => !e.style?.is_unsorted && e.id !== elementId && Math.abs((e.x || 0) - 100) < 150 && Math.abs((e.y || 0) - 100) < 150);
         if (hasConflict) {
-          pendingUnsortedBoardsRef.current.add(targetBoardId);
+          pendingUnsortedBoardsRef.current.add(resolvedTargetId);
           await ipcService.updateElementStyle(elementId, { ...(elToMove.style || {}), is_unsorted: true });
         } else {
           await ipcService.updateElementStyle(elementId, { ...(elToMove.style || {}), is_unsorted: false });
@@ -346,8 +368,9 @@ export const App: React.FC = () => {
       }
     } catch (e) {
       console.error('Failed to move element to board:', e);
+      setElements((prev) => [...prev, elToMove]);
     }
-  }, [elements, recordHistory]);
+  }, [elements, recordHistory, currentBoardId]);
 
   const handleMoveToUnsorted = useCallback(async (id: string) => {
     const el = elements.find(e => e.id === id);
@@ -549,7 +572,21 @@ export const App: React.FC = () => {
     if (!contextMenu || !contextMenu.element) return;
     recordHistory(elements);
     const el = contextMenu.element;
-    setElements((prev) => prev.map((x) => x.id === el.id ? { ...x, element_type: 'nested_board', width: 80, height: 100 } : x));
+    let subBoardId: string | undefined = undefined;
+    try {
+      const createdBoard = await ipcService.createBoard(el.content?.title || el.content?.text || 'New Board', currentBoardId);
+      subBoardId = createdBoard.id;
+    } catch (err) {
+      console.error('Failed to create board in db:', err);
+    }
+    const updatedContent = {
+      ...(el.content || {}),
+      title: el.content?.title || el.content?.text || 'New Board',
+      preview_title: el.content?.title || el.content?.text || 'New Board',
+      target_board_id: subBoardId,
+    };
+    setElements((prev) => prev.map((x) => x.id === el.id ? { ...x, element_type: 'nested_board', width: 80, height: 100, content: updatedContent } : x));
+    await ipcService.updateElementContent(el.id, updatedContent);
   };
 
   const handleCreateBoardShortcut = async (boardId: string) => {
@@ -579,13 +616,19 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleDropTool = async (tool: ToolType, x: number, y: number, targetColumnId?: string, isUnsorted: boolean = false) => {
+  const handleDropTool = async (tool: ToolType, x: number, y: number, targetColumnId?: string, isUnsorted: boolean = false, targetBoardId?: string) => {
     if (tool === 'line' && isUnsorted) return;
     recordHistory(elements);
     let elementType: any = tool;
     let initialContent: Record<string, any> = {};
     let defaultWidth = 340;
     let defaultHeight = 60;
+
+    let destBoardId = currentBoardId;
+    if (targetBoardId) {
+      const bEl = elements.find(e => (e.id === targetBoardId || e.content?.target_board_id === targetBoardId) && e.element_type === 'nested_board');
+      destBoardId = bEl?.content?.target_board_id || targetBoardId;
+    }
 
     if (tool === 'note' || tool === 'heading') {
       elementType = 'note';
@@ -609,7 +652,18 @@ export const App: React.FC = () => {
       defaultHeight = 130;
     } else if (tool === 'nested_board') {
       elementType = 'nested_board';
-      initialContent = { title: 'New Board' };
+      let subBoardId: string | undefined = undefined;
+      try {
+        const createdBoard = await ipcService.createBoard('New Board', destBoardId);
+        subBoardId = createdBoard.id;
+      } catch (err) {
+        console.error('Failed to create board in db:', err);
+      }
+      initialContent = {
+        title: 'New Board',
+        preview_title: 'New Board',
+        target_board_id: subBoardId
+      };
       defaultWidth = 80;
       defaultHeight = 100;
     } else if (tool === 'link') {
@@ -674,7 +728,7 @@ export const App: React.FC = () => {
     }
 
     const newEl = await ipcService.createElement({
-      board_id: currentBoardId,
+      board_id: destBoardId,
       element_type: elementType,
       x,
       y,
@@ -685,11 +739,13 @@ export const App: React.FC = () => {
       style: initialStyle,
     });
 
-    setElements((prev) => [...prev, newEl]);
-    setSelectedElementId(newEl.id);
+    if (destBoardId === currentBoardId) {
+      setElements((prev) => [...prev, newEl]);
+      setSelectedElementId(newEl.id);
 
-    if (tool === 'note' || tool === 'heading' || tool === 'link' || tool === 'task_list') {
-      setEditingElementId(newEl.id);
+      if (tool === 'note' || tool === 'heading' || tool === 'link' || tool === 'task_list') {
+        setEditingElementId(newEl.id);
+      }
     }
   };
 
@@ -1224,7 +1280,7 @@ export const App: React.FC = () => {
           <Toolbar
             activeTool={activeTool}
             onSelectTool={setActiveTool}
-            isDraggingElement={Boolean(selectedElementId || selectedIds.length > 0)}
+            isDraggingElement={isElementBeingDragged}
             isHoveringTrash={isHoveringTrash}
             onTrashDrop={() => handleDelete()}
             onAddImageFromDrawer={handleAddImageFromDrawer}
@@ -1287,9 +1343,10 @@ export const App: React.FC = () => {
           onDeleteElement={handleDelete}
           onSetHoveringTrash={setIsHoveringTrash}
           isHoveringTrash={isHoveringTrash}
-                scale={canvasScale}
-                onSetScale={setCanvasScale}
-              />
+          onDragChange={setIsElementBeingDragged}
+          scale={canvasScale}
+          onSetScale={setCanvasScale}
+        />
 
               {/* FLOATING TOP-RIGHT UNSORTED PILL BUTTON */}
               {!isPresentationMode && !isUnsortedDrawerOpen && (
