@@ -4,7 +4,8 @@ import { UnsortedDrawer } from './UnsortedDrawer';
 import { invoke } from '@tauri-apps/api/core';
 import { CommentCard } from './CommentCard';
 import { TaskListCard } from './TaskListCard';
-import { Element, ElementPositionUpdate, ToolType, TableSubTarget } from '../types';
+import { Element, ElementPositionUpdate, ToolType, TableSubTarget, CardColorTint, CARD_COLORS } from '../types';
+import { isTouchPrimary, isAndroid, isPhoneScreen } from '../utils/platform';
 import {
   FolderPlus,
   BookOpen,
@@ -24,7 +25,14 @@ import {
   Link as LinkIcon,
   Image as ImageIcon,
   User,
-  CornerUpRight
+  CornerUpRight,
+  Trash2,
+  Copy,
+  CopyPlus,
+  Lock,
+  Unlock,
+  X,
+  CheckSquare
 } from 'lucide-react';
 
 const isLightColor = (hex?: string): boolean => {
@@ -346,6 +354,25 @@ const evaluateFormula = (formula: string, cells: Record<number, any>, cols: numb
   return formula;
 };
 
+export const TOOL_LABELS: Record<string, string> = {
+  note: 'Note',
+  link: 'Link',
+  task_list: 'To-do List',
+  line: 'Line',
+  nested_board: 'Board',
+  column: 'Column',
+  comment: 'Comment',
+  table: 'Table',
+  image: 'Image',
+  heading: 'Heading',
+  sketch: 'Sketch',
+  color: 'Color',
+  document: 'Document',
+  audio: 'Audio',
+  map: 'Map',
+  video: 'Video',
+};
+
 export interface CanvasProps {
   elements: Element[];
   selectedElementId: string | null;
@@ -373,15 +400,23 @@ export interface CanvasProps {
   onUnsortedReorder?: (sourceId: string, targetId: string) => void;
   onHoverBoard?: (boardId: string | null) => void;
   isPresentationMode?: boolean;
+  activeTool?: ToolType;
+  onSelectTool?: (tool: ToolType) => void;
   onDropTool: (tool: ToolType, x: number, y: number, targetColumnId?: string, isUnsorted?: boolean, targetBoardId?: string) => void;
   onCreateTaskListFromItem?: (x: number, y: number, item: any, targetColumnId?: string) => void;
   onCreateQuickLine?: (sourceElementId: string) => Promise<string | undefined>;
   onDeleteElement?: (id: string) => void;
+  onDuplicateElement?: (id?: string) => void;
+  onCopyElement?: () => void;
+  onToggleLockElement?: (id?: string) => void;
+  onRecolorElement?: (tint: CardColorTint) => void;
   onSetHoveringTrash?: (isHovering: boolean) => void;
   isHoveringTrash?: boolean;
   onDragChange?: (isDragging: boolean) => void;
   scale: number;
   onSetScale: (scale: number) => void;
+  onCanvasClick?: () => void;
+  onTwoFingerTap?: (canvasX: number, canvasY: number) => void;
 }
 
 const ICON_NAME_MAP: Record<string, any> = {
@@ -625,19 +660,29 @@ export const Canvas: React.FC<CanvasProps> = ({
   onUnsortedReorder = () => {},
   onHoverBoard,
   isPresentationMode = false,
+  activeTool = 'select',
+  onSelectTool,
   onDropTool,
   onCreateTaskListFromItem = () => {},
   onCreateQuickLine,
   onDeleteElement = () => {},
+  onDuplicateElement,
+  onCopyElement,
+  onToggleLockElement,
+  onRecolorElement,
   onSetHoveringTrash = () => {},
   isHoveringTrash = false,
   onDragChange,
   scale,
   onSetScale,
+  onCanvasClick,
+  onTwoFingerTap,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
+  const [isTouchMultiSelectMode, setIsTouchMultiSelectMode] = useState(false);
+  const [showTouchColorPalette, setShowTouchColorPalette] = useState(false);
   const panStartRef = useRef({ x: 0, y: 0, startPanX: 0, startPanY: 0 });
   const scrollbarDragRef = useRef<{
     axis: 'h' | 'v';
@@ -684,6 +729,21 @@ export const Canvas: React.FC<CanvasProps> = ({
   } | null>(null);
 
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
+
+  // Pointer & Touch gesture tracking for mobile/touch screens (pinch-to-zoom, touch-pan, two-finger tap)
+  const pointersRef = useRef<Map<number, { clientX: number; clientY: number; pointerType: string }>>(new Map());
+  const pinchStateRef = useRef<{
+    initialDist: number;
+    initialScale: number;
+    initialPan: { x: number; y: number };
+    initialMidpoint: { x: number; y: number };
+  } | null>(null);
+  const twoFingerTapRef = useRef<{
+    startTime: number;
+    startX: number;
+    startY: number;
+    moved: boolean;
+  } | null>(null);
 
   const lineHandleDragRef = useRef<{
     lineId: string;
@@ -1055,10 +1115,89 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
   }, [scale, pan.x, pan.y, onSetScale, clampPan]);
 
-  const handleMouseDown = (e: React.MouseEvent) => {
+  const handlePointerDown = (e: React.PointerEvent | React.MouseEvent) => {
     if (activeInlineComment) setActiveInlineComment(null);
     const target = e.target as HTMLElement;
-    if (target === containerRef.current || target.classList.contains('canvas-viewport') || target.classList.contains('canvas-plane') || target.classList.contains('canvas-viewport-grid')) {
+    const isCanvasBg = target === containerRef.current || target.classList.contains('canvas-viewport') || target.classList.contains('canvas-plane') || target.classList.contains('canvas-viewport-grid');
+
+    // Tap-to-place active tool support (Task 2.8)
+    if (activeTool && activeTool !== 'select' && !target.closest('.canvas-tool-placement-banner') && !target.closest('.touch-selection-action-bar') && !target.closest('.mobile-main-bottom-bar')) {
+      const columnEl = target.closest('.column-container');
+      const columnId = columnEl ? columnEl.getAttribute('data-column-id') : undefined;
+      const canvasPos = screenToCanvas(e.clientX, e.clientY);
+      const offset = activeTool === 'nested_board' ? 40 : (activeTool === 'image' ? 50 : 20);
+
+      if (columnId) {
+        onDropTool(activeTool, Math.round(canvasPos.x), Math.round(canvasPos.y), columnId);
+      } else {
+        onDropTool(activeTool, Math.round(canvasPos.x - offset), Math.round(canvasPos.y - offset));
+      }
+
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+        try { navigator.vibrate(25); } catch (_) {}
+      }
+
+      onSelectTool?.('select');
+      return;
+    }
+
+    // Do not initiate pan on text inputs or contentEditable (Task 2.9)
+    const isTextInput = target && (
+      target.tagName === 'INPUT' || 
+      target.tagName === 'TEXTAREA' || 
+      target.isContentEditable || 
+      Boolean(target.closest('[contenteditable="true"]'))
+    );
+    if (isTextInput) {
+      return;
+    }
+
+    const ptr = e as React.PointerEvent;
+    if (ptr.pointerId !== undefined) {
+      pointersRef.current.set(ptr.pointerId, {
+        clientX: e.clientX,
+        clientY: e.clientY,
+        pointerType: ptr.pointerType || 'mouse',
+      });
+    }
+
+    if (ptr.pointerType === 'touch') {
+      if (pointersRef.current.size === 1 && isCanvasBg) {
+        // Single touch on canvas: initiate touch panning
+        setIsPanning(true);
+        panStartRef.current = { x: e.clientX, y: e.clientY, startPanX: pan.x, startPanY: pan.y };
+        onSelectElement(null);
+        onSetEditingElement(null);
+        if (onMultiSelect) onMultiSelect([]);
+        onCanvasClick?.();
+        return;
+      }
+
+      if (pointersRef.current.size === 2) {
+        // Two fingers: Pinch-to-zoom & two-finger tap detection
+        setIsPanning(false);
+        const pts = Array.from(pointersRef.current.values());
+        const dist = Math.hypot(pts[0].clientX - pts[1].clientX, pts[0].clientY - pts[1].clientY);
+        const midX = (pts[0].clientX + pts[1].clientX) / 2;
+        const midY = (pts[0].clientY + pts[1].clientY) / 2;
+        pinchStateRef.current = {
+          initialDist: dist,
+          initialScale: scale,
+          initialPan: { ...pan },
+          initialMidpoint: { x: midX, y: midY },
+        };
+        twoFingerTapRef.current = {
+          startTime: Date.now(),
+          startX: midX,
+          startY: midY,
+          moved: false,
+        };
+        return;
+      }
+    }
+
+    if (isCanvasBg) {
+      onCanvasClick?.();
       if (e.button === 1 || e.buttons === 4 || ((e.ctrlKey || e.metaKey) && e.button === 0)) {
         e.preventDefault();
         setIsPanning(true);
@@ -1081,6 +1220,8 @@ export const Canvas: React.FC<CanvasProps> = ({
       }
     }
   };
+
+  const handleMouseDown = handlePointerDown;
 
   const handleDoubleClick = (e: React.MouseEvent) => {
     const target = e.target as HTMLElement;
@@ -1313,8 +1454,46 @@ export const Canvas: React.FC<CanvasProps> = ({
     dragRafRef.current = requestAnimationFrame(tick);
   }, [canvasToScreen, checkDragTargets, scale]);
 
-  const handleMouseMove = useCallback((e: MouseEvent) => {
-    if (e.buttons === 0 && (selectionRef.current || dragRef.current || lineHandleDragRef.current || headerResizeRef.current || isPanning || scrollbarDragRef.current)) {
+  const handleMouseMove = useCallback((e: MouseEvent | PointerEvent) => {
+    const ptr = e as PointerEvent;
+    if (ptr.pointerId !== undefined && pointersRef.current.has(ptr.pointerId)) {
+      pointersRef.current.set(ptr.pointerId, {
+        clientX: e.clientX,
+        clientY: e.clientY,
+        pointerType: ptr.pointerType || 'mouse',
+      });
+    }
+
+    // Two-finger pinch-to-zoom & two-finger pan
+    if (pointersRef.current.size >= 2 && pinchStateRef.current) {
+      const pts = Array.from(pointersRef.current.values());
+      const currentDist = Math.hypot(pts[0].clientX - pts[1].clientX, pts[0].clientY - pts[1].clientY);
+      const currentMidX = (pts[0].clientX + pts[1].clientX) / 2;
+      const currentMidY = (pts[0].clientY + pts[1].clientY) / 2;
+      const { initialDist, initialScale, initialPan, initialMidpoint } = pinchStateRef.current;
+
+      if (initialDist > 0) {
+        if (twoFingerTapRef.current) {
+          if (Math.hypot(currentMidX - twoFingerTapRef.current.startX, currentMidY - twoFingerTapRef.current.startY) > 12 || Math.abs(currentDist - initialDist) > 15) {
+            twoFingerTapRef.current.moved = true;
+          }
+        }
+        const factor = currentDist / initialDist;
+        const newScale = Math.min(3.0, Math.max(0.25, Number((initialScale * factor).toFixed(3))));
+        const scaleRatio = newScale / initialScale;
+        const focalX = initialMidpoint.x;
+        const focalY = initialMidpoint.y;
+        const newPanX = focalX - (focalX - initialPan.x) * scaleRatio + (currentMidX - initialMidpoint.x);
+        const newPanY = focalY - (focalY - initialPan.y) * scaleRatio + (currentMidY - initialMidpoint.y);
+
+        onSetScale(newScale);
+        setPan(clampPan(newPanX, newPanY, newScale));
+      }
+      return;
+    }
+
+    const isMouseRelease = (!ptr.pointerType || ptr.pointerType === 'mouse') && e.buttons === 0;
+    if (isMouseRelease && (selectionRef.current || dragRef.current || lineHandleDragRef.current || headerResizeRef.current || isPanning || scrollbarDragRef.current)) {
       if (scrollbarDragRef.current) {
         scrollbarDragRef.current = null;
         if (scrollbarRafRef.current !== null) {
@@ -1636,7 +1815,8 @@ export const Canvas: React.FC<CanvasProps> = ({
       const { elementId, startX, startY, offsetX, offsetY, isResize, resizeDirection, isFromColumn, dragGroup } = dragRef.current;
       
       const dist = Math.hypot(e.clientX - startX, e.clientY - startY);
-      const dragThreshold = isFromColumn ? 16 : 6;
+      const isTouch = (ptr.pointerType === 'touch') || isTouchPrimary();
+      const dragThreshold = isTouch ? (isFromColumn ? 20 : 14) : (isFromColumn ? 16 : 6);
       if (!dragRef.current.hasExceededThreshold && dist < dragThreshold && !isResize) {
         return;
       }
@@ -1782,7 +1962,28 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
   }, [isPanning, scale, screenToCanvas, canvasToScreen, elements, onMultiSelect, onSetHoveringTrash, columns, activeDragId, setLineDragPreview, computeLineEndpoint, onContentChange, headerResize, onMoveElementToBoard, onOpenBoard, isHoveringUnsorted, onOpenUnsortedDrawer, startDragRafLoop, clampPan, onDragChange]);
 
-  const handleMouseUp = useCallback((e: MouseEvent) => {
+  const handleMouseUp = useCallback((e: MouseEvent | PointerEvent) => {
+    const ptr = e as PointerEvent;
+
+    if (ptr.pointerType === 'touch' && twoFingerTapRef.current) {
+      const duration = Date.now() - twoFingerTapRef.current.startTime;
+      if (!twoFingerTapRef.current.moved && duration < 450) {
+        const cPos = screenToCanvas(twoFingerTapRef.current.startX, twoFingerTapRef.current.startY);
+        if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+          try { navigator.vibrate(30); } catch (_) {}
+        }
+        onTwoFingerTap?.(Math.round(cPos.x), Math.round(cPos.y));
+      }
+      twoFingerTapRef.current = null;
+    }
+
+    if (ptr.pointerId !== undefined) {
+      pointersRef.current.delete(ptr.pointerId);
+    }
+    if (pointersRef.current.size < 2) {
+      pinchStateRef.current = null;
+    }
+
     if (hoverEnterBoardRef.current?.timer) {
       clearTimeout(hoverEnterBoardRef.current.timer);
       hoverEnterBoardRef.current = null;
@@ -2085,10 +2286,16 @@ export const Canvas: React.FC<CanvasProps> = ({
   useEffect(() => {
     window.addEventListener('mousemove', handleMouseMove as any);
     window.addEventListener('mouseup', handleMouseUp as any);
+    window.addEventListener('pointermove', handleMouseMove as any);
+    window.addEventListener('pointerup', handleMouseUp as any);
+    window.addEventListener('pointercancel', handleMouseUp as any);
     window.addEventListener('blur', handleMouseUp as any);
     return () => {
       window.removeEventListener('mousemove', handleMouseMove as any);
       window.removeEventListener('mouseup', handleMouseUp as any);
+      window.removeEventListener('pointermove', handleMouseMove as any);
+      window.removeEventListener('pointerup', handleMouseUp as any);
+      window.removeEventListener('pointercancel', handleMouseUp as any);
       window.removeEventListener('blur', handleMouseUp as any);
       if (dragRafRef.current !== null) {
         cancelAnimationFrame(dragRafRef.current);
@@ -2100,6 +2307,52 @@ export const Canvas: React.FC<CanvasProps> = ({
       }
     };
   }, [handleMouseMove, handleMouseUp, setLineDragPreview, onContentChange]);
+
+  // Task 2.9: Soft Keyboard / VisualViewport handling for mobile text editing
+  useEffect(() => {
+    if (!editingElementId) return;
+
+    const scrollIntoVisualView = () => {
+      const dom = document.getElementById(`milanote-el-${editingElementId}`);
+      if (!dom) return;
+
+      const vv = typeof window !== 'undefined' ? window.visualViewport : null;
+      const vh = vv ? vv.height : window.innerHeight;
+      const vy = vv ? (vv.offsetTop || 0) : 0;
+      const rect = dom.getBoundingClientRect();
+
+      const bottomLimit = vy + vh - 20;
+      const topLimit = vy + 50;
+
+      if (rect.bottom > bottomLimit || rect.top < topLimit) {
+        const desiredTop = vy + Math.max(70, Math.floor(vh * 0.22));
+        const dy = desiredTop - rect.top;
+        setPan((prev) => clampPan(prev.x, prev.y + dy));
+      }
+    };
+
+    scrollIntoVisualView();
+    const t1 = setTimeout(scrollIntoVisualView, 120);
+    const t2 = setTimeout(scrollIntoVisualView, 320);
+
+    const handleResize = () => {
+      scrollIntoVisualView();
+    };
+
+    if (typeof window !== 'undefined' && window.visualViewport) {
+      window.visualViewport.addEventListener('resize', handleResize);
+      window.visualViewport.addEventListener('scroll', handleResize);
+    }
+
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+      if (typeof window !== 'undefined' && window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', handleResize);
+        window.visualViewport.removeEventListener('scroll', handleResize);
+      }
+    };
+  }, [editingElementId, clampPan]);
 
   const handleQuickConnectStart = async (e: React.MouseEvent, el: Element) => {
     e.stopPropagation();
@@ -2113,22 +2366,51 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
   };
 
-  const handleElementMouseDown = (e: React.MouseEvent, element: Element, isResize = false, resizeDirection?: 'se' | 'e', isFromColumn = false) => {
+  const handleElementMouseDown = (e: React.MouseEvent | React.PointerEvent, element: Element, isResize = false, resizeDirection?: 'se' | 'e', isFromColumn = false) => {
     e.stopPropagation();
     if (element.element_type === 'task_list' && isResize) return;
     if (element.style?.is_locked && !isResize) return;
+
+    // Tap-to-place onto column or board container (Task 2.8)
+    if (activeTool && activeTool !== 'select') {
+      const colId = element.element_type === 'column' ? element.id : (element.style?.parent_column_id || undefined);
+      const canvasPos = screenToCanvas(e.clientX, e.clientY);
+      onDropTool(activeTool, Math.round(canvasPos.x), Math.round(canvasPos.y), colId);
+      onSelectTool?.('select');
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+        try { navigator.vibrate(25); } catch (_) {}
+      }
+      return;
+    }
 
     const target = e.target as HTMLElement;
     const isReadOnlyInput = (target.tagName === 'INPUT' && (target as HTMLInputElement).readOnly) || 
                             (target.tagName === 'TEXTAREA' && (target as HTMLTextAreaElement).readOnly);
 
-    if (!isResize && !isReadOnlyInput && target && (
-      editingElementId === element.id ||
+    const isTextInput = !isReadOnlyInput && target && (
       target.tagName === 'INPUT' || 
       target.tagName === 'TEXTAREA' || 
       target.isContentEditable || 
       Boolean(target.closest('[contenteditable="true"]'))
-    )) {
+    );
+
+    // Touch Multi-select mode toggle (Task 2.10)
+    if (isTouchMultiSelectMode && !isResize && !isTextInput) {
+      const currentSelected = selectedIds.length > 0 ? [...selectedIds] : (selectedElementId ? [selectedElementId] : []);
+      const index = currentSelected.indexOf(element.id);
+      let nextSelected: string[];
+      if (index >= 0) {
+        nextSelected = currentSelected.filter((id) => id !== element.id);
+      } else {
+        nextSelected = [...currentSelected, element.id];
+      }
+      if (onMultiSelect) onMultiSelect(nextSelected);
+      onSelectElement(nextSelected[nextSelected.length - 1] || null);
+      if (editingElementId) onSetEditingElement(null);
+      return;
+    }
+
+    if (!isResize && isTextInput) {
       if (selectedElementId !== element.id && !selectedIds.includes(element.id)) {
         onSelectElement(element.id);
       }
@@ -2362,7 +2644,12 @@ export const Canvas: React.FC<CanvasProps> = ({
               }
             }}
             onDoubleClick={(e) => { e.stopPropagation(); onOpenBoard(el.content.shortcut_target_id || el.id); }}
-            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onContextMenu(e, el); }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (isTouchPrimary() || isPhoneScreen()) return;
+              onContextMenu(e, el);
+            }}
           >
             <div className="column-board-icon-box" style={{ background: boardBg, position: 'relative' }}>
               {BadgeIcon && <BadgeIcon size={22} color="#ffffff" />}
@@ -3090,6 +3377,13 @@ export const Canvas: React.FC<CanvasProps> = ({
                 handleElementMouseDown(e, el, false, undefined, inColumn);
               }
             }}
+            onPointerDown={(e) => {
+              if (customMouseDown) {
+                customMouseDown(e as any, el);
+              } else {
+                handleElementMouseDown(e, el, false, undefined, inColumn);
+              }
+            }}
             onClick={(e) => {
               e.stopPropagation();
               if (dragOccurredRef.current) {
@@ -3103,7 +3397,12 @@ export const Canvas: React.FC<CanvasProps> = ({
                 onSelectElement(el.id);
               }
             }}
-            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onContextMenu(e, el); }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (isTouchPrimary() || isPhoneScreen()) return;
+              onContextMenu(e, el);
+            }}
           >
             {Boolean(el.style?.top_strip_color) && (
               <div className="note-top-strip-bar" style={{ backgroundColor: el.style?.top_strip_color }} />
@@ -3278,6 +3577,13 @@ export const Canvas: React.FC<CanvasProps> = ({
                 handleElementMouseDown(e, el, false, undefined, false);
               }
             }}
+            onPointerDown={(e) => {
+              if (customMouseDown) {
+                customMouseDown(e as any, el);
+              } else {
+                handleElementMouseDown(e, el, false, undefined, false);
+              }
+            }}
             onDoubleClick={(e) => { e.stopPropagation(); onOpenBoard(el.content.shortcut_target_id || el.id); }}
             onClick={(e) => {
               e.stopPropagation();
@@ -3292,7 +3598,12 @@ export const Canvas: React.FC<CanvasProps> = ({
                 onSelectElement(el.id);
               }
             }}
-            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onContextMenu(e, el); }}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (isTouchPrimary() || isPhoneScreen()) return;
+              onContextMenu(e, el);
+            }}
           >
             <div className="board-icon-badge" style={{ background: boardBg, position: 'relative' }}>
               {BadgeIcon && <BadgeIcon size={36} color="#ffffff" />}
@@ -3426,6 +3737,13 @@ export const Canvas: React.FC<CanvasProps> = ({
               handleElementMouseDown(e, el, false, undefined, inColumn);
             }
           }}
+          onPointerDown={(e) => {
+            if (customMouseDown) {
+              customMouseDown(e as any, el);
+            } else {
+              handleElementMouseDown(e, el, false, undefined, inColumn);
+            }
+          }}
           onDoubleClick={(e) => { e.stopPropagation(); onSetEditingElement(el.id); }}
           onClick={(e) => {
             e.stopPropagation();
@@ -3440,7 +3758,12 @@ export const Canvas: React.FC<CanvasProps> = ({
               onSelectElement(el.id);
             }
           }}
-          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onContextMenu(e, el); }}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (isTouchPrimary() || isPhoneScreen()) return;
+            onContextMenu(e, el);
+          }}
         >
           {Boolean(topStrip) && !isComment && (
             <div className="note-top-strip-bar" style={{ backgroundColor: topStrip }} />
@@ -3517,11 +3840,14 @@ export const Canvas: React.FC<CanvasProps> = ({
       data-pan-y={pan.y}
       onWheel={handleWheel}
       onMouseDown={handleMouseDown}
+      onPointerDown={handlePointerDown}
       onDoubleClick={handleDoubleClick}
       onDragOver={handleDragOver}
       onDrop={handleDrop}
       onContextMenu={(e) => {
         e.preventDefault();
+        e.stopPropagation();
+        if (isTouchPrimary() || isPhoneScreen()) return;
         const target = e.target as HTMLElement;
         if (target === containerRef.current || target.classList.contains('canvas-viewport') || target.classList.contains('canvas-plane') || target.classList.contains('canvas-viewport-grid')) {
           onContextMenu(e, null, screenToCanvas(e.clientX, e.clientY));
@@ -3951,6 +4277,143 @@ export const Canvas: React.FC<CanvasProps> = ({
         onDropNewTool={(tool) => onDropTool && onDropTool(tool, 100, 100, undefined, true)}
         renderElement={(el, onMouseDown) => renderStandardCard(el, true, onMouseDown)}
       />
+
+      {/* FLOATING TOOL PLACEMENT BANNER (TAP-TO-PLACE - TASK 2.8) */}
+      {activeTool && activeTool !== 'select' && (
+        <div className="canvas-tool-placement-banner" onClick={(e) => e.stopPropagation()}>
+          <div className="placement-indicator-dot" />
+          <span className="placement-text">
+            Tap canvas to place <strong>{TOOL_LABELS[activeTool] || activeTool}</strong>
+          </span>
+          <button
+            className="placement-action-btn"
+            onClick={() => {
+              const centerScreenX = window.innerWidth / 2;
+              const centerScreenY = window.innerHeight / 2;
+              const cPos = screenToCanvas(centerScreenX, centerScreenY);
+              const offset = activeTool === 'nested_board' ? 40 : 20;
+              onDropTool(activeTool, Math.round(cPos.x - offset), Math.round(cPos.y - offset));
+              onSelectTool?.('select');
+            }}
+            title="Place in center of canvas"
+          >
+            Place in Center
+          </button>
+          <button
+            className="placement-cancel-btn"
+            onClick={() => onSelectTool?.('select')}
+            title="Cancel tool placement"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {/* FLOATING TOUCH SELECTION ACTION BAR (TOUCH SHORTCUTS ALTERNATIVE - TASK 2.10) */}
+      {(selectedElementId || selectedIds.length > 0) && (
+        <div className="touch-selection-action-bar" onClick={(e) => e.stopPropagation()}>
+          <div className="selection-count-badge">
+            {selectedIds.length > 1 ? `${selectedIds.length} items` : '1 item'}
+          </div>
+
+          <button
+            className={`touch-action-btn ${isTouchMultiSelectMode ? 'active' : ''}`}
+            onClick={() => setIsTouchMultiSelectMode(!isTouchMultiSelectMode)}
+            title="Multi-select mode (tap cards to add/remove)"
+          >
+            <CheckSquare size={17} />
+            <span>Select</span>
+          </button>
+
+          {onDuplicateElement && (
+            <button
+              className="touch-action-btn"
+              onClick={() => onDuplicateElement(selectedElementId || undefined)}
+              title="Duplicate"
+            >
+              <CopyPlus size={17} />
+              <span>Duplicate</span>
+            </button>
+          )}
+
+          {onCopyElement && (
+            <button
+              className="touch-action-btn"
+              onClick={() => onCopyElement()}
+              title="Copy"
+            >
+              <Copy size={17} />
+              <span>Copy</span>
+            </button>
+          )}
+
+          {onToggleLockElement && (
+            <button
+              className="touch-action-btn"
+              onClick={() => onToggleLockElement(selectedElementId || undefined)}
+              title="Lock/Unlock position"
+            >
+              <Lock size={17} />
+              <span>Lock</span>
+            </button>
+          )}
+
+          {onRecolorElement && (
+            <div style={{ position: 'relative' }}>
+              <button
+                className={`touch-action-btn ${showTouchColorPalette ? 'active' : ''}`}
+                onClick={() => setShowTouchColorPalette(!showTouchColorPalette)}
+                title="Change card color"
+              >
+                <Palette size={17} />
+                <span>Color</span>
+              </button>
+              {showTouchColorPalette && (
+                <div className="touch-color-palette-popover">
+                  {(Object.keys(CARD_COLORS) as CardColorTint[]).map((tint) => (
+                    <div
+                      key={tint}
+                      className="touch-color-swatch"
+                      style={{ backgroundColor: CARD_COLORS[tint].bg, borderColor: CARD_COLORS[tint].border }}
+                      onClick={() => {
+                        onRecolorElement(tint);
+                        setShowTouchColorPalette(false);
+                      }}
+                      title={CARD_COLORS[tint].name}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          <button
+            className="touch-action-btn danger"
+            onClick={() => {
+              if (selectedElementId) {
+                onDeleteElement(selectedElementId);
+              }
+            }}
+            title="Delete / Move to Trash"
+          >
+            <Trash2 size={17} />
+            <span>Delete</span>
+          </button>
+
+          <button
+            className="touch-action-btn close-btn"
+            onClick={() => {
+              onSelectElement(null);
+              if (onMultiSelect) onMultiSelect([]);
+              setIsTouchMultiSelectMode(false);
+              setShowTouchColorPalette(false);
+            }}
+            title="Deselect all"
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
     </div>
   );
 };

@@ -2,7 +2,8 @@ use milanote_core::{
     Board, BoardTreeNode, Database, Element, ElementPositionUpdate, SearchResult,
 };
 use uuid::Uuid;
-use tauri::State;
+use tauri::{AppHandle, State};
+use tauri_plugin_opener::OpenerExt;
 
 #[tauri::command]
 pub async fn list_boards(state: State<'_, Database>, parent_id: Option<Uuid>) -> Result<Vec<Board>, String> {
@@ -113,13 +114,7 @@ pub async fn duplicate_board(
 }
 
 #[tauri::command]
-pub async fn open_external_url(url: String) -> Result<(), String> {
+pub async fn open_external_url(app: AppHandle, url: String) -> Result<(), String> {
     println!("Opening external URL in system browser: {}", url);
-    #[cfg(target_os = "linux")]
-    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
-    #[cfg(target_os = "windows")]
-    let _ = std::process::Command::new("cmd").args(["/C", "start", &url]).spawn();
-    #[cfg(target_os = "macos")]
-    let _ = std::process::Command::new("open").arg(&url).spawn();
-    Ok(())
+    app.opener().open_url(&url, None::<&str>).map_err(|e| e.to_string())
 }

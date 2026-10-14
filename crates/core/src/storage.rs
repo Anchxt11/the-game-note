@@ -10,6 +10,11 @@ pub struct FileStorage {
 }
 
 impl FileStorage {
+    /// Opens the file storage at the default desktop location using `directories::ProjectDirs`.
+    ///
+    /// NOTE: Do not call this on mobile/Android as `ProjectDirs` cannot resolve the
+    /// application directory. Mobile/Tauri hosts should resolve the directory via Tauri's
+    /// path API (`app.path().app_data_dir()`) and call [`FileStorage::open_dir`] instead.
     pub fn open_default() -> Result<Self> {
         let proj_dirs = ProjectDirs::from("com", "anchit", "gameNote")
             .ok_or_else(|| AppError::InvalidOperation("Failed to determine project data directory".into()))?;

@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { Element, ToolType } from '../types';
-import { Folder } from 'lucide-react';
+import { Folder, ArrowLeft, X } from 'lucide-react';
 
 interface UnsortedDrawerProps {
   isOpen: boolean;
@@ -206,6 +206,12 @@ export const UnsortedDrawer: React.FC<UnsortedDrawerProps> = ({
         </div>
       )}
 
+      {/* Mobile Backdrop for bottom sheet mode */}
+      <div
+        className="mobile-unsorted-backdrop"
+        onClick={onClose}
+      />
+
       <aside
         ref={containerRef}
         className="unsorted-drawer"
@@ -213,7 +219,8 @@ export const UnsortedDrawer: React.FC<UnsortedDrawerProps> = ({
           position: 'absolute',
           top: 0,
           right: 0,
-          width: '340px',
+          width: 'var(--unsorted-drawer-width, 340px)',
+          maxWidth: '100vw',
           height: '100%',
           backgroundColor: 'rgb(33, 33, 33)',
           borderLeft: '1px solid rgb(51, 51, 51)',
@@ -238,6 +245,7 @@ export const UnsortedDrawer: React.FC<UnsortedDrawerProps> = ({
       >
         {/* Header */}
         <div
+          className="unsorted-drawer-header"
           style={{
             height: '52px',
             borderBottom: '1px solid rgb(51, 51, 51)',
@@ -251,27 +259,40 @@ export const UnsortedDrawer: React.FC<UnsortedDrawerProps> = ({
           }}
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <Folder size={18} color="#aaa" />
+            <button
+              className="drawer-mobile-back-btn"
+              onClick={onClose}
+              title="Back to board"
+            >
+              <ArrowLeft size={18} />
+            </button>
+            <Folder className="drawer-header-folder-icon" size={18} color="#aaa" />
             <span style={{ color: '#fff', fontSize: '15px', fontWeight: 700, fontFamily: 'Outfit, sans-serif' }}>
-              Unsorted ({unsortedElements.length})
+              Unsorted {unsortedElements.length > 0 ? `(${unsortedElements.length})` : ''}
             </span>
           </div>
           <button
             onClick={onClose}
+            className="drawer-close-btn"
             style={{
               background: 'none',
               border: 'none',
               color: '#999',
               fontSize: '13px',
               cursor: 'pointer',
-              padding: '4px 8px',
+              padding: '6px 10px',
               borderRadius: '4px',
               transition: 'color 0.15s ease',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              minHeight: '36px',
             }}
             onMouseOver={(e) => (e.currentTarget.style.color = '#fff')}
             onMouseOut={(e) => (e.currentTarget.style.color = '#999')}
           >
-            Close
+            <span>Close</span>
+            <X size={16} />
           </button>
         </div>
 

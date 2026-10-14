@@ -14,6 +14,9 @@ import { TableActionSidebar } from './components/TableActionSidebar';
 import { CellActionSidebar } from './components/CellActionSidebar';
 import { Canvas } from './components/Canvas';
 import { ContextMenu } from './components/ContextMenu';
+import { SearchModal } from './components/SearchModal';
+import { MobileBottomBar } from './components/MobileBottomBar';
+import { isPhoneScreen, isTouchPrimary } from './utils/platform';
 import { ipcService } from './services/ipc';
 import { 
   Search as SearchIcon, 
@@ -26,7 +29,8 @@ import {
   Folder,
   Users,
   ChevronDown,
-  Minimize2
+  Minimize2,
+  ArrowLeft
 } from 'lucide-react';
 import './index.css';
 
@@ -39,6 +43,7 @@ export const App: React.FC = () => {
   const [renamingLinkId, setRenamingLinkId] = useState<string | null>(null);
   const [canvasScale, setCanvasScale] = useState<number>(1.0);
   const [isUnsortedDrawerOpen, setIsUnsortedDrawerOpen] = useState(false);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [selectedTableCells, setSelectedTableCells] = useState<{ tableId: string; cellIndices: number[] } | null>(null);
   const pendingUnsortedBoardsRef = useRef<Set<string>>(new Set());
   
@@ -82,6 +87,13 @@ export const App: React.FC = () => {
   const [showViewMenu, setShowViewMenu] = useState<boolean>(false);
   const [isPresentationMode, setIsPresentationMode] = useState<boolean>(false);
   const [dragHoverBoardId, setDragHoverBoardId] = useState<string | null>(null);
+  const [twoFingerMenu, setTwoFingerMenu] = useState<{ canvasX: number; canvasY: number } | null>(null);
+  const [resetMobileBarTrigger, setResetMobileBarTrigger] = useState<number>(0);
+
+  const handleCanvasClick = useCallback(() => {
+    setResetMobileBarTrigger((prev) => prev + 1);
+    setTwoFingerMenu(null);
+  }, []);
 
   const recordHistory = useCallback((currentState: Element[]) => {
     setUndoStack((prev) => [...prev.slice(-30), currentState]);
@@ -148,16 +160,28 @@ export const App: React.FC = () => {
     } catch {}
   }, [currentBoardId, loadElements]);
 
-  const handleCopy = useCallback(() => {
-    const idsToCopy = selectedIds.length > 0 ? selectedIds : selectedElementId ? [selectedElementId] : [];
+  const handleCopy = useCallback((targetId?: string) => {
+    const idsToCopy = selectedIds.length > 0 
+      ? selectedIds 
+      : targetId 
+        ? [targetId] 
+        : selectedElementId 
+          ? [selectedElementId] 
+          : (contextMenu?.element ? [contextMenu.element.id] : []);
     if (idsToCopy.length === 0) return;
     const copies = elements.filter((el) => idsToCopy.includes(el.id)).map((el) => JSON.parse(JSON.stringify(el)));
     setClipboardElements(copies);
     try { localStorage.setItem('milanote_clipboard', JSON.stringify(copies)); } catch {}
-  }, [selectedIds, selectedElementId, elements]);
+  }, [selectedIds, selectedElementId, elements, contextMenu]);
 
-  const handleCut = useCallback(() => {
-    const idsToCopy = selectedIds.length > 0 ? selectedIds : selectedElementId ? [selectedElementId] : [];
+  const handleCut = useCallback((targetId?: string) => {
+    const idsToCopy = selectedIds.length > 0 
+      ? selectedIds 
+      : targetId 
+        ? [targetId] 
+        : selectedElementId 
+          ? [selectedElementId] 
+          : (contextMenu?.element ? [contextMenu.element.id] : []);
     if (idsToCopy.length === 0) return;
     const copies = elements.filter((el) => idsToCopy.includes(el.id)).map((el) => JSON.parse(JSON.stringify(el)));
     setClipboardElements(copies);
@@ -169,7 +193,7 @@ export const App: React.FC = () => {
     setSelectedIds([]);
     setSelectedElementId(null);
     setContextMenu(null);
-  }, [selectedIds, selectedElementId, elements, recordHistory]);
+  }, [selectedIds, selectedElementId, elements, recordHistory, contextMenu]);
 
   const handlePaste = useCallback((targetX?: number, targetY?: number) => {
     if (!clipboardElements || clipboardElements.length === 0) return;
@@ -273,6 +297,12 @@ export const App: React.FC = () => {
           handlePaste();
           return;
         }
+      }
+
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        setIsSearchOpen((prev) => !prev);
+        return;
       }
 
       if (isTyping || editingElementId) return;
@@ -478,17 +508,20 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleRecolor = async (tint: CardColorTint) => {
-    if (!contextMenu || !contextMenu.element) return;
-    const targetId = contextMenu.element.id;
-    const newStyle = { ...(contextMenu.element.style || {}), color_tint: tint };
-    handleStyleChange(targetId, newStyle);
+  const handleRecolor = async (tintOrColor: CardColorTint | string, targetId?: string) => {
+    const el = contextMenu?.element || elements.find(item => item.id === (targetId || selectedElementId)) || null;
+    if (!el) return;
+    const isHexOrColor = tintOrColor.startsWith('#') || tintOrColor === 'transparent' || tintOrColor.startsWith('rgb');
+    const newStyle = isHexOrColor
+      ? { ...(el.style || {}), background_color: tintOrColor === 'transparent' ? undefined : tintOrColor }
+      : { ...(el.style || {}), color_tint: tintOrColor as CardColorTint };
+    handleStyleChange(el.id, newStyle);
   };
 
-  const handleDuplicate = async () => {
-    if (!contextMenu || !contextMenu.element) return;
+  const handleDuplicate = async (targetId?: string) => {
+    const el = contextMenu?.element || elements.find(item => item.id === (targetId || selectedElementId)) || null;
+    if (!el) return;
     recordHistory(elements);
-    const el = contextMenu.element;
     const newEl = await ipcService.createElement({
       board_id: el.board_id,
       element_type: el.element_type,
@@ -496,11 +529,13 @@ export const App: React.FC = () => {
       y: el.y + 36,
       width: el.width,
       height: el.height,
-      z_index: el.z_index + 1,
+      z_index: (el.z_index || 10) + 1,
       content: { ...el.content, title: el.content.title ? `${el.content.title} (Copy)` : undefined },
       style: { ...el.style },
     });
     setElements((prev) => [...prev, newEl]);
+    setSelectedElementId(newEl.id);
+    setSelectedIds([newEl.id]);
   };
 
   const handleDelete = async (idToDelete?: string) => {
@@ -530,16 +565,16 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleToggleLock = async () => {
-    if (!contextMenu || !contextMenu.element) return;
-    const el = contextMenu.element;
+  const handleToggleLock = async (targetId?: string) => {
+    const el = contextMenu?.element || elements.find(item => item.id === (targetId || selectedElementId)) || null;
+    if (!el) return;
     const nextLocked = !Boolean(el.style?.is_locked);
     handleStyleChange(el.id, { ...(el.style || {}), is_locked: nextLocked });
   };
 
-  const handleBringToFront = async () => {
-    if (!contextMenu || !contextMenu.element) return;
-    const el = contextMenu.element;
+  const handleBringToFront = async (targetId?: string) => {
+    const el = contextMenu?.element || elements.find(item => item.id === (targetId || selectedElementId)) || null;
+    if (!el) return;
     const maxZ = Math.max(...elements.map((item) => item.z_index || 10), 10);
     const newZ = maxZ + 1;
     handleUpdateElementPositions([
@@ -547,9 +582,9 @@ export const App: React.FC = () => {
     ]);
   };
 
-  const handleSendToBack = async () => {
-    if (!contextMenu || !contextMenu.element) return;
-    const el = contextMenu.element;
+  const handleSendToBack = async (targetId?: string) => {
+    const el = contextMenu?.element || elements.find(item => item.id === (targetId || selectedElementId)) || null;
+    if (!el) return;
     const minZ = Math.min(...elements.map((item) => item.z_index || 10), 10);
     if (minZ > 1) {
       const newZ = minZ - 1;
@@ -773,6 +808,53 @@ export const App: React.FC = () => {
     setSelectedElementId(newEl.id);
   };
 
+  const handleDropToolAtScreen = (tool: ToolType, clientX: number, clientY: number) => {
+    const vp = document.querySelector('.canvas-viewport') as HTMLElement | null;
+    let targetX = 100;
+    let targetY = 100;
+    if (vp) {
+      const rect = vp.getBoundingClientRect();
+      const panX = parseFloat(vp.getAttribute('data-pan-x') || '0');
+      const panY = parseFloat(vp.getAttribute('data-pan-y') || '0');
+      targetX = (clientX - rect.left - panX) / canvasScale;
+      targetY = (clientY - rect.top - panY) / canvasScale;
+    }
+
+    let targetColumnId: string | undefined = undefined;
+    let targetBoardId: string | undefined = undefined;
+
+    // Check if dropped onto a column
+    const colEls = elements.filter(el => el.element_type === 'column' && !el.style?.is_unsorted);
+    for (const col of colEls) {
+      const cDiv = document.getElementById(`milanote-el-${col.id}`);
+      if (cDiv) {
+        const r = cDiv.getBoundingClientRect();
+        if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) {
+          targetColumnId = col.id;
+          break;
+        }
+      }
+    }
+
+    // Check if dropped onto a nested board
+    if (!targetColumnId) {
+      const bEls = elements.filter(el => el.element_type === 'nested_board' && !el.style?.is_unsorted);
+      for (const b of bEls) {
+        const bDiv = document.getElementById(`milanote-el-${b.id}`);
+        if (bDiv) {
+          const r = bDiv.getBoundingClientRect();
+          if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) {
+            targetBoardId = b.content?.target_board_id || b.id;
+            break;
+          }
+        }
+      }
+    }
+
+    const offset = tool === 'nested_board' ? 40 : 20;
+    handleDropTool(tool, Math.round(targetX - offset), Math.round(targetY - offset), targetColumnId, false, targetBoardId);
+  };
+
   const handleCreateQuickLine = async (sourceElId: string): Promise<string | undefined> => {
     recordHistory(elements);
     const sourceEl = elements.find(el => el.id === sourceElId);
@@ -926,6 +1008,8 @@ export const App: React.FC = () => {
 
   return (
     <div className={`milanote-app-container ${isPresentationMode ? 'presentation-mode' : ''}`} onClick={() => setShowViewMenu(false)}>
+      {/* Top Status Bar Padding Band for Mobile (Image 1) */}
+      <div className="mobile-status-bar-filler" />
       {isPresentationMode ? (
         <button className="exit-presentation-btn" onClick={() => setIsPresentationMode(false)} title="Exit Presentation Mode (Press Esc)">
           <Minimize2 size={16} /> Exit Presentation
@@ -938,6 +1022,51 @@ export const App: React.FC = () => {
               <div className={`home-circle-logo ${dragHoverBoardId === 'root-board' ? 'drag-hover-highlight' : ''}`} title="Home" data-board-id="root-board" onClick={() => handleBreadcrumbClick(0)}>
                 <span>M</span>
               </div>
+
+              {/* Mobile back navigation button */}
+              {currentBoardId !== 'root-board' && (
+                <button
+                  className="mobile-topbar-back-btn"
+                  onClick={() => handleBreadcrumbClick(Math.max(0, boardHistory.length - 2))}
+                  title="Back to parent board"
+                >
+                  <ArrowLeft size={18} />
+                </button>
+              )}
+
+              {/* Mobile compact title */}
+              {currentBoardId !== 'root-board' ? (
+                <input
+                  key={`mobile-title-${currentBoardId}`}
+                  type="text"
+                  className="mobile-board-title"
+                  value={boardHistory[boardHistory.length - 1]?.title || 'Board'}
+                  onChange={(e) => {
+                    const nextTitle = e.target.value;
+                    setBoardHistory((prev) => prev.map((node, i) => i === prev.length - 1 ? { ...node, title: nextTitle } : node));
+                  }}
+                  onBlur={async (e) => {
+                    const nextTitle = e.target.value || 'Untitled Board';
+                    setBoardHistory((prev) => prev.map((node, i) => i === prev.length - 1 ? { ...node, title: nextTitle } : node));
+                    if (currentBoardId !== 'root-board') {
+                      try {
+                        await ipcService.updateElementContent(currentBoardId, { title: nextTitle });
+                      } catch (err) {
+                        console.error('Failed to update board title in IPC:', err);
+                      }
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === 'Escape') {
+                      e.currentTarget.blur();
+                    }
+                  }}
+                  title="Click to edit board title"
+                />
+              ) : (
+                <span className="mobile-board-title">GameNote</span>
+              )}
+
               <nav className="breadcrumb-path">
                 {boardHistory.map((node, i) => (
                   <React.Fragment key={node.id}>
@@ -981,7 +1110,8 @@ export const App: React.FC = () => {
               <button className="topbar-icon-btn" title="Mobile & Apps"><Smartphone size={17} /></button>
               <button className="topbar-icon-btn" title="Help & Guides"><HelpCircle size={17} /></button>
               <button className="topbar-icon-btn" title="Notifications"><Bell size={17} /></button>
-              <button className="topbar-icon-btn" title="Search"><SearchIcon size={17} /></button>
+              <button className="topbar-icon-btn" title="Search (Ctrl+K)" onClick={() => setIsSearchOpen(true)}><SearchIcon size={17} /></button>
+              <button className="topbar-icon-btn mobile-unsorted-toggle-btn" title="Unsorted items" onClick={() => setIsUnsortedDrawerOpen((prev) => !prev)}><Folder size={17} /></button>
               <button className="topbar-icon-btn" title="Settings & Profile"><Settings size={17} /></button>
             </div>
           </header>
@@ -1332,20 +1462,30 @@ export const App: React.FC = () => {
           onUpdateElementPositions={handleUpdateElementPositions}
           onContentChange={handleContentChange}
           onStyleChange={handleStyleChange}
-          onContextMenu={(e, element, canvasPos, tableSubTarget) => setContextMenu({ x: e.clientX, y: e.clientY, canvasX: canvasPos?.x, canvasY: canvasPos?.y, element, tableSubTarget })}
+          onContextMenu={(e, element, canvasPos, tableSubTarget) => {
+            if (isPhoneScreen() || isTouchPrimary()) return;
+            setContextMenu({ x: e.clientX, y: e.clientY, canvasX: canvasPos?.x, canvasY: canvasPos?.y, element, tableSubTarget });
+          }}
           onOpenBoard={handleOpenBoard}
           onMoveElementToBoard={handleMoveElementToBoard}
           onHoverBoard={setDragHoverBoardId}
-          isPresentationMode={isPresentationMode}
+          activeTool={activeTool}
+          onSelectTool={setActiveTool}
           onDropTool={handleDropTool}
           onCreateTaskListFromItem={handleCreateTaskListFromItem}
           onCreateQuickLine={handleCreateQuickLine}
           onDeleteElement={handleDelete}
+          onDuplicateElement={handleDuplicate}
+          onCopyElement={handleCopy}
+          onToggleLockElement={handleToggleLock}
+          onRecolorElement={handleRecolor}
           onSetHoveringTrash={setIsHoveringTrash}
           isHoveringTrash={isHoveringTrash}
           onDragChange={setIsElementBeingDragged}
           scale={canvasScale}
           onSetScale={setCanvasScale}
+          onCanvasClick={handleCanvasClick}
+          onTwoFingerTap={(cx, cy) => setTwoFingerMenu({ canvasX: cx, canvasY: cy })}
         />
 
               {/* FLOATING TOP-RIGHT UNSORTED PILL BUTTON */}
@@ -1425,6 +1565,126 @@ export const App: React.FC = () => {
           onContentChange={handleContentChange}
           onCreateBoardShortcut={handleCreateBoardShortcut}
         />
+      )}
+
+      {/* Global Search Modal (Task 3.7) */}
+      <SearchModal
+        isOpen={isSearchOpen}
+        onClose={() => setIsSearchOpen(false)}
+        onSelectResult={(boardId, elementId) => {
+          handleOpenBoard(boardId);
+          if (elementId) {
+            setTimeout(() => {
+              setSelectedElementId(elementId);
+              setSelectedIds([elementId]);
+            }, 80);
+          }
+        }}
+      />
+
+      {/* Floating Mobile Top Back Button (Shown when inside sub-board on mobile) */}
+      {currentBoardId !== 'root-board' && (
+        <button
+          className="mobile-floating-back-btn"
+          onClick={() => handleBreadcrumbClick(Math.max(0, boardHistory.length - 2))}
+          title="Back to parent board"
+        >
+          <ArrowLeft size={18} />
+          <span>{boardHistory[boardHistory.length - 2]?.title || 'Back'}</span>
+        </button>
+      )}
+
+      {/* Native Milanote Mobile Bottom Bar (Screens 1, 2, 3, 4, 5) */}
+      <MobileBottomBar
+        currentBoardId={currentBoardId}
+        boardTitle={boardHistory[boardHistory.length - 1]?.title || 'Board'}
+        unsortedCount={elements.filter(el => Boolean(el.style?.is_unsorted) && el.element_type !== 'line').length}
+        onOpenUnsorted={() => setIsUnsortedDrawerOpen(true)}
+        onOpenBoardsMenu={() => handleBreadcrumbClick(0)}
+        canUndo={undoStack.length > 0}
+        canRedo={redoStack.length > 0}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        onOpenSearch={() => setIsSearchOpen(true)}
+        activeTool={activeTool}
+        onSelectTool={setActiveTool}
+        onDropToolAtScreen={handleDropToolAtScreen}
+        isUnsortedOpen={isUnsortedDrawerOpen}
+        selectedElement={elements.find(x => x.id === selectedElementId) || null}
+        selectedIds={selectedIds}
+        onDeselect={() => {
+          setSelectedElementId(null);
+          setSelectedIds([]);
+          setEditingElementId(null);
+        }}
+        onRecolor={handleRecolor}
+        onCut={handleCut}
+        onCopy={handleCopy}
+        onDuplicate={handleDuplicate}
+        onDelete={() => handleDelete()}
+        onToggleLock={handleToggleLock}
+        onBringToFront={handleBringToFront}
+        onSendToBack={handleSendToBack}
+        onAddCommentPin={handleAddCommentPinToElement}
+        onToggleTaskTitle={handleToggleTaskTitle}
+        onSetTaskDueDate={handleSetTaskDueDate}
+        onToggleCaption={(id) => {
+          const el = elements.find(x => x.id === id);
+          if (el?.element_type === 'image') handleToggleImageCaption(id);
+          else handleToggleLinkCaption(id);
+        }}
+        onRename={(id) => {
+          const el = elements.find(x => x.id === id);
+          if (el?.element_type === 'link') setRenamingLinkId(id);
+          else setEditingElementId(id);
+        }}
+        onSetIcon={handleSetBoardIcon}
+        resetTrigger={resetMobileBarTrigger}
+        editingElement={activeEditingElement}
+        onDoneEditing={() => setEditingElementId(null)}
+        onStyleChange={handleStyleChange}
+        onContentChange={handleContentChange}
+      />
+
+      {/* Two-Finger Tap Context Menu Sheet (Screenshot 1) */}
+      {twoFingerMenu && (
+        <div
+          className="mobile-context-sheet-backdrop"
+          onClick={() => setTwoFingerMenu(null)}
+        >
+          <div
+            className="mobile-two-finger-sheet"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              className={`mobile-context-sheet-item ${undoStack.length === 0 ? 'disabled' : ''}`}
+              onClick={() => {
+                handleUndo();
+                setTwoFingerMenu(null);
+              }}
+            >
+              <span>Undo</span>
+            </button>
+            <button
+              className={`mobile-context-sheet-item ${clipboardElements.length === 0 ? 'disabled' : ''}`}
+              onClick={() => {
+                handlePaste(twoFingerMenu.canvasX, twoFingerMenu.canvasY);
+                setTwoFingerMenu(null);
+              }}
+            >
+              <span>Paste</span>
+            </button>
+            <button
+              className="mobile-context-sheet-item"
+              onClick={() => {
+                handleSelectAll();
+                setTwoFingerMenu(null);
+              }}
+            >
+              <span>Select All</span>
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );
