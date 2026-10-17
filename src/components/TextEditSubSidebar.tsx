@@ -155,6 +155,22 @@ export const TextEditSubSidebar: React.FC<TextEditSubSidebarProps> = ({
         e.preventDefault();
         e.stopPropagation();
       }}
+      onPointerDown={(e) => {
+        const target = e.target as HTMLElement;
+        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+      }}
+      onTouchStart={(e) => {
+        const target = e.target as HTMLElement;
+        if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
+          return;
+        }
+        e.preventDefault();
+        e.stopPropagation();
+      }}
     >
       {/* Top Close Back Arrow */}
       <button className="sub-sidebar-btn" onClick={onClose} title="Done editing (Return to View Mode)">

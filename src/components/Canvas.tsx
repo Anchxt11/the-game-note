@@ -1,11 +1,11 @@
-import React, { useRef, useEffect, useState, useCallback, useMemo } from 'react';
-import { createPortal } from 'react-dom';
+import React, { useRef, useEffect, useLayoutEffect, useState, useCallback, useMemo } from 'react';
 import { UnsortedDrawer } from './UnsortedDrawer';
 import { invoke } from '@tauri-apps/api/core';
 import { CommentCard } from './CommentCard';
 import { TaskListCard } from './TaskListCard';
 import { Element, ElementPositionUpdate, ToolType, TableSubTarget, CardColorTint, CARD_COLORS } from '../types';
-import { isTouchPrimary, isAndroid, isPhoneScreen } from '../utils/platform';
+import { isTouchPrimary, isAndroid, isPhoneScreen, isTablet, isAndroidTablet, getDeviceCategory } from '../utils/platform';
+import { saveSelection, restoreSelection, SavedSelection } from '../utils/selectionUtils';
 import {
   FolderPlus,
   BookOpen,
@@ -110,6 +110,258 @@ const openExternalUrl = async (targetUrl: string) => {
   }
 };
 
+interface NoteRichEditorComponentProps {
+  id: string;
+  isEditing: boolean;
+  content: any;
+  onContentChange: (id: string, content: any) => void;
+  setActiveInlineComment: (val: any) => void;
+}
+
+const NoteRichEditorComponent: React.FC<NoteRichEditorComponentProps> = ({
+  id,
+  isEditing,
+  content,
+  onContentChange,
+  setActiveInlineComment,
+}) => {
+  const editorRef = useRef<HTMLDivElement>(null);
+  const lastSavedSelRef = useRef<SavedSelection | null>(null);
+
+  const rawText = content.text || '';
+  const hasFormatting =
+    rawText.includes('<ul') ||
+    rawText.includes('<ol') ||
+    rawText.includes('<li') ||
+    rawText.includes('text-align') ||
+    rawText.includes('&nbsp;') ||
+    rawText.includes('\u00A0') ||
+    rawText.includes('<h') ||
+    rawText.includes('<pre') ||
+    rawText.includes('<blockquote');
+
+  const cleanHtml = (rawText.replace(/<[^>]*>/g, '').trim() === '' && !hasFormatting) ? '' : rawText;
+
+  useLayoutEffect(() => {
+    const el = editorRef.current;
+    if (!el) return;
+
+    // If DOM innerHTML already matches cleanHtml, DO NOT touch innerHTML!
+    // Touching innerHTML destroys child DOM nodes and causes the caret to jump to 0.
+    if (el.innerHTML === cleanHtml) {
+      return;
+    }
+
+    if (isEditing) {
+      const isFocused = document.activeElement === el || el.contains(document.activeElement);
+      if (isFocused) {
+        const currentSel = saveSelection(el) || lastSavedSelRef.current;
+        el.innerHTML = cleanHtml;
+        if (currentSel) {
+          restoreSelection(el, currentSel);
+        }
+        return;
+      }
+    }
+
+    el.innerHTML = cleanHtml;
+  }, [cleanHtml, isEditing]);
+
+  useEffect(() => {
+    if (!isEditing) return;
+
+    const handleSelectionChange = () => {
+      const el = editorRef.current;
+      if (!el) return;
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0 && (el.contains(sel.anchorNode) || el === sel.anchorNode)) {
+        lastSavedSelRef.current = saveSelection(el);
+      }
+    };
+
+    document.addEventListener('selectionchange', handleSelectionChange);
+    return () => {
+      document.removeEventListener('selectionchange', handleSelectionChange);
+    };
+  }, [isEditing]);
+
+  useEffect(() => {
+    if (isEditing && editorRef.current) {
+      if (document.activeElement !== editorRef.current && !editorRef.current.contains(document.activeElement)) {
+        editorRef.current.focus();
+      }
+    }
+  }, [isEditing]);
+
+  return (
+    <div
+      ref={editorRef}
+      className="note-rich-editor"
+      contentEditable={isEditing}
+      suppressContentEditableWarning={true}
+      data-placeholder="Start typing..."
+      style={{ color: 'inherit', flex: 1, minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}
+      onKeyDown={(e) => {
+        if (e.key === 'Tab') {
+          e.preventDefault();
+          e.stopPropagation();
+          const selection = window.getSelection();
+          if (!selection || selection.rangeCount === 0) return;
+          
+          let node: Node | null = selection.anchorNode;
+          let inList = false;
+          while (node && node !== e.currentTarget) {
+            if (node.nodeName === 'LI' || node.nodeName === 'UL' || node.nodeName === 'OL') {
+              inList = true;
+              break;
+            }
+            node = node.parentNode;
+          }
+
+          if (inList) {
+            if (e.shiftKey) {
+              document.execCommand('outdent', false, undefined);
+            } else {
+              document.execCommand('indent', false, undefined);
+            }
+          } else {
+            if (!e.shiftKey) {
+              if (!document.execCommand('insertHTML', false, '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;')) {
+                document.execCommand('insertText', false, '        ');
+              }
+            }
+          }
+        }
+      }}
+      onMouseDown={(e) => {
+        const target = e.target as HTMLElement;
+        if (isEditing || target.closest('a') || target.closest('.milanote-inline-comment')) {
+          e.stopPropagation();
+        }
+      }}
+      onClick={(e) => {
+        const target = e.target as HTMLElement;
+        const commentSpan = target.closest('.milanote-inline-comment') as HTMLElement | null;
+        if (commentSpan) {
+          e.stopPropagation();
+          const commentId = commentSpan.getAttribute('data-comment-id');
+          if (commentId) {
+            const rect = commentSpan.getBoundingClientRect();
+            setActiveInlineComment({
+              elementId: id,
+              commentId,
+              rect: { top: rect.bottom + 8, left: rect.right - 20 }
+            });
+            return;
+          }
+        }
+        const linkTag = target.closest('a') as HTMLAnchorElement | null;
+        if (linkTag) {
+          e.preventDefault();
+          e.stopPropagation();
+          if (linkTag.href && linkTag.href.trim() !== '') {
+            openExternalUrl(linkTag.href);
+          }
+        }
+      }}
+      onInput={(e) => {
+        const target = e.currentTarget;
+        const html = target.innerHTML;
+        const text = target.textContent || '';
+        const hasFmt = html.includes('<ul') || html.includes('<ol') || html.includes('<li') || html.includes('text-align') || html.includes('&nbsp;') || html.includes('\u00A0') || html.includes('<h') || html.includes('<pre') || html.includes('<blockquote') || text.length > 0;
+        if (text.trim() === '' && !hasFmt) {
+          if (target.innerHTML === '<br>' || target.innerHTML === '<div><br></div>' || target.innerHTML === '<p><br></p>') {
+            target.innerHTML = '';
+          }
+        }
+      }}
+      onBlur={(e) => {
+        const target = e.currentTarget;
+        const text = target.textContent || '';
+        const html = target.innerHTML;
+        const hasFmt = html.includes('<ul') || html.includes('<ol') || html.includes('<li') || html.includes('text-align') || html.includes('&nbsp;') || html.includes('\u00A0') || text.length > 0;
+        const cleanText = (text.trim() === '' && !hasFmt) ? '' : html;
+        onContentChange(id, { ...content, text: cleanText });
+      }}
+    />
+  );
+};
+
+interface ImageCaptionEditorComponentProps {
+  id: string;
+  isEditing: boolean;
+  caption: string;
+  onContentChange: (id: string, content: any) => void;
+  elContent: any;
+}
+
+const ImageCaptionEditorComponent: React.FC<ImageCaptionEditorComponentProps> = ({
+  id,
+  isEditing,
+  caption,
+  onContentChange,
+  elContent,
+}) => {
+  const editorRef = useRef<HTMLDivElement>(null);
+  const lastSavedSelRef = useRef<SavedSelection | null>(null);
+  const cleanCaption = caption || '';
+
+  useLayoutEffect(() => {
+    const el = editorRef.current;
+    if (!el) return;
+
+    if (el.innerHTML === cleanCaption) {
+      return;
+    }
+
+    if (isEditing) {
+      const isFocused = document.activeElement === el || el.contains(document.activeElement);
+      if (isFocused) {
+        const currentSel = saveSelection(el) || lastSavedSelRef.current;
+        el.innerHTML = cleanCaption;
+        if (currentSel) {
+          restoreSelection(el, currentSel);
+        }
+        return;
+      }
+    }
+
+    el.innerHTML = cleanCaption;
+  }, [cleanCaption, isEditing]);
+
+  useEffect(() => {
+    if (!isEditing) return;
+    const handleSelectionChange = () => {
+      const el = editorRef.current;
+      if (!el) return;
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount > 0 && (el.contains(sel.anchorNode) || el === sel.anchorNode)) {
+        lastSavedSelRef.current = saveSelection(el);
+      }
+    };
+    document.addEventListener('selectionchange', handleSelectionChange);
+    return () => {
+      document.removeEventListener('selectionchange', handleSelectionChange);
+    };
+  }, [isEditing]);
+
+  return (
+    <div
+      ref={editorRef}
+      className="note-rich-editor image-caption-editor"
+      contentEditable={isEditing}
+      suppressContentEditableWarning={true}
+      data-placeholder="Add a caption..."
+      style={{ color: '#e4ebf7', minHeight: '20px', outline: 'none', fontSize: '13.5px' }}
+      onBlur={(e) => {
+        if (elContent.caption !== e.currentTarget.innerHTML) {
+          onContentChange(id, { ...elContent, caption: e.currentTarget.innerHTML });
+        }
+      }}
+    />
+  );
+};
+
 const RichLinkPreview: React.FC<{
   el: Element;
   onSetEditingElement?: (id: string | null) => void;
@@ -118,6 +370,9 @@ const RichLinkPreview: React.FC<{
   onFinishRenaming?: () => void;
 }> = ({ el, onSetEditingElement, onContentChange, isRenaming = false, onFinishRenaming = () => {} }) => {
   const [imgError, setImgError] = useState(false);
+  const [bannerAspect, setBannerAspect] = useState<number | null>(() => {
+    return el.content?.preview_aspect || null;
+  });
   const url = el.content?.url || '';
   const fallbackData = useMemo(() => getRichLinkData(url), [url]);
   const previewData = el.content?.preview || fallbackData;
@@ -160,7 +415,12 @@ const RichLinkPreview: React.FC<{
     >
       <div 
         className="rich-link-banner-wrap"
-        style={{ cursor: 'pointer' }}
+        style={{ 
+          cursor: 'pointer',
+          aspectRatio: bannerAspect ? `${bannerAspect}` : undefined,
+          minHeight: 'unset',
+          maxHeight: 'none',
+        }}
         onMouseDown={(e) => e.stopPropagation()}
         onClick={(e) => {
           e.stopPropagation();
@@ -173,9 +433,16 @@ const RichLinkPreview: React.FC<{
             src={previewData.imageUrl}
             alt={previewData.title}
             onError={() => setImgError(true)}
+            onLoad={(e) => {
+              const img = e.currentTarget;
+              if (img.naturalWidth && img.naturalHeight) {
+                const asp = img.naturalWidth / img.naturalHeight;
+                setBannerAspect(asp);
+              }
+            }}
           />
         ) : (
-          <div style={{ width: '100%', height: '160px', background: 'linear-gradient(135deg, #2b2c30 0%, #1e1f22 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#73747d', fontSize: '13px' }}>
+          <div style={{ width: '100%', aspectRatio: '16 / 9', background: 'linear-gradient(135deg, #2b2c30 0%, #1e1f22 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#73747d', fontSize: '13px' }}>
             <Globe size={32} opacity={0.4} />
           </div>
         )}
@@ -416,7 +683,8 @@ export interface CanvasProps {
   scale: number;
   onSetScale: (scale: number) => void;
   onCanvasClick?: () => void;
-  onTwoFingerTap?: (canvasX: number, canvasY: number) => void;
+  onTwoFingerTap?: (canvasX: number, canvasY: number, clientX?: number, clientY?: number, targetEl?: Element | null) => void;
+  onUploadImageForElement?: (elementId: string, dataUrl: string) => void;
 }
 
 const ICON_NAME_MAP: Record<string, any> = {
@@ -677,6 +945,7 @@ export const Canvas: React.FC<CanvasProps> = ({
   onSetScale,
   onCanvasClick,
   onTwoFingerTap,
+  onUploadImageForElement,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -684,6 +953,10 @@ export const Canvas: React.FC<CanvasProps> = ({
   const [isTouchMultiSelectMode, setIsTouchMultiSelectMode] = useState(false);
   const [showTouchColorPalette, setShowTouchColorPalette] = useState(false);
   const panStartRef = useRef({ x: 0, y: 0, startPanX: 0, startPanY: 0 });
+  const touchHoldTimerRef = useRef<any>(null);
+  const touchHoldStartPosRef = useRef<{ clientX: number; clientY: number } | null>(null);
+  const isTouchSelectingRef = useRef(false);
+  const lastTouchTapRef = useRef<{ time: number; x: number; y: number } | null>(null);
   const scrollbarDragRef = useRef<{
     axis: 'h' | 'v';
     startMouse: number;
@@ -707,6 +980,13 @@ export const Canvas: React.FC<CanvasProps> = ({
 
   const [selectionBox, setSelectionBox] = useState<{ startX: number; startY: number; currentX: number; currentY: number } | null>(null);
   const selectionRef = useRef<{ startX: number; startY: number; currentX: number; currentY: number } | null>(null);
+  const selectionInitialIdsRef = useRef<string[]>([]);
+  const [isSpacePressed, setIsSpacePressed] = useState(false);
+  const isSpacePressedRef = useRef(false);
+  const lastElementPointerDownTimeRef = useRef<{ id: string; time: number }>({ id: '', time: 0 });
+  const lastCanvasDownTimeRef = useRef<number>(0);
+  const lastDispatchedSelectedRef = useRef<string[]>([]);
+  const mouseUpRef = useRef<(e: MouseEvent | PointerEvent) => void>(() => {});
 
   const dragRef = useRef<{
     elementId: string;
@@ -715,7 +995,9 @@ export const Canvas: React.FC<CanvasProps> = ({
     offsetX: number;
     offsetY: number;
     isResize?: boolean;
-    resizeDirection?: 'se' | 'e';
+    resizeDirection?: 'se' | 'e' | 's';
+    liveWidth?: number;
+    liveHeight?: number;
     isFromColumn?: boolean;
     origColumnId?: string | null;
     hasExceededThreshold?: boolean;
@@ -723,9 +1005,32 @@ export const Canvas: React.FC<CanvasProps> = ({
     targetDy: number;
     currentDx: number;
     currentDy: number;
+    currentTilt?: number;
+    lastRafX?: number;
+    lastMoveTime?: number;
+    lastClientX?: number;
+    smoothVx?: number;
     clientX: number;
     clientY: number;
-    dragGroup: Array<{ id: string; origX: number; origY: number; currentX?: number; currentY?: number; origWidth: number; origHeight: number; zIndex: number; isColumn?: boolean; isFromColumn?: boolean; elementType?: string; isVideoLink?: boolean }>;
+    dragGroup: Array<{
+      id: string;
+      origX: number;
+      origY: number;
+      currentX?: number;
+      currentY?: number;
+      origWidth: number;
+      origHeight: number;
+      zIndex: number;
+      isColumn?: boolean;
+      isFromColumn?: boolean;
+      elementType?: string;
+      isVideoLink?: boolean;
+      imageAspect?: number;
+      linkBannerAspect?: number;
+      linkBodyHeight?: number;
+      origCols?: number;
+      origRows?: number;
+    }>;
   } | null>(null);
 
   const [activeDragId, setActiveDragId] = useState<string | null>(null);
@@ -735,8 +1040,8 @@ export const Canvas: React.FC<CanvasProps> = ({
   const pinchStateRef = useRef<{
     initialDist: number;
     initialScale: number;
-    initialPan: { x: number; y: number };
-    initialMidpoint: { x: number; y: number };
+    focalCanvasX: number;
+    focalCanvasY: number;
   } | null>(null);
   const twoFingerTapRef = useRef<{
     startTime: number;
@@ -744,6 +1049,35 @@ export const Canvas: React.FC<CanvasProps> = ({
     startY: number;
     moved: boolean;
   } | null>(null);
+  const lastPinchEndTimeRef = useRef(0);
+  const scaleRef = useRef(scale);
+  scaleRef.current = scale;
+  const panRef = useRef(pan);
+  panRef.current = pan;
+
+  const targetScaleRef = useRef<number | null>(null);
+  const zoomAnchorRef = useRef<{ x: number; y: number } | null>(null);
+  const zoomRafRef = useRef<number | null>(null);
+  const isZoomingRef = useRef(false);
+  const zoomOriginRef = useRef<{ scale: number; pan: { x: number; y: number } } | null>(null);
+  const lastInternalScaleSetRef = useRef(scale);
+
+  const [zoomOsd, setZoomOsd] = useState<{ scale: number; visible: boolean }>({
+    scale,
+    visible: false,
+  });
+  const zoomOsdTimerRef = useRef<number | null>(null);
+
+  const triggerZoomOsd = useCallback((newScale: number) => {
+    setZoomOsd({ scale: newScale, visible: true });
+    if (zoomOsdTimerRef.current !== null) {
+      clearTimeout(zoomOsdTimerRef.current);
+    }
+    zoomOsdTimerRef.current = window.setTimeout(() => {
+      setZoomOsd((prev) => ({ ...prev, visible: false }));
+      zoomOsdTimerRef.current = null;
+    }, 1000);
+  }, []);
 
   const lineHandleDragRef = useRef<{
     lineId: string;
@@ -816,14 +1150,23 @@ export const Canvas: React.FC<CanvasProps> = ({
     return { x, y };
   }, [pan.x, pan.y, scale]);
 
-  const getPanLimits = useCallback((vpWidth: number, vpHeight: number, currentScale: number) => {
-    const vpCanvasW = vpWidth / currentScale;
-    const vpCanvasH = vpHeight / currentScale;
+  const isTouchHoldContextMenu = useCallback((e: React.MouseEvent) => {
+    if (getDeviceCategory() === 'phone') return true;
+    const native = e.nativeEvent as any;
+    if (e.button === 2) return false;
+    if (native?.pointerType === 'touch') return true;
+    if (isTouchSelectingRef.current) return true;
+    if (pointersRef.current.size === 1) return true;
+    return false;
+  }, []);
 
-    const activeEls = elements.filter(el => !el.style?.is_unsorted && !el.style?.parent_column_id);
+  const getPanLimits = useCallback((vpWidth: number, vpHeight: number, currentScale: number) => {
+    const activeEls = elements.filter(
+      (el) => !el.style?.is_unsorted && !el.style?.parent_column_id && el.element_type !== 'line'
+    );
     let minElX = Infinity, maxElX = -Infinity, minElY = Infinity, maxElY = -Infinity;
     if (activeEls.length > 0) {
-      activeEls.forEach(el => {
+      activeEls.forEach((el) => {
         const w = el.width || (el.element_type === 'nested_board' ? 80 : 340);
         const h = el.height || (el.element_type === 'nested_board' ? 100 : 60);
         if (el.x < minElX) minElX = el.x;
@@ -833,49 +1176,262 @@ export const Canvas: React.FC<CanvasProps> = ({
       });
     }
 
-    const HEADROOM = 400;
+    const hasElements = activeEls.length > 0;
+    const contentMinX = hasElements ? minElX : 0;
+    const contentMaxX = hasElements ? maxElX : 800;
+    const contentMinY = hasElements ? minElY : 0;
+    const contentMaxY = hasElements ? maxElY : 600;
 
-    // Anchor canonical origin (0, 0); only expand into negative space if elements are placed there
-    const minX = Math.min(0, minElX < Infinity ? minElX - 100 : 0);
-    const minY = Math.min(0, minElY < Infinity ? minElY - 100 : 0);
+    // Ideal centered pan coordinates that place the active content in the center of the viewport
+    const centerPanX = Math.round((vpWidth - (contentMinX + contentMaxX) * currentScale) / 2);
+    const centerPanY = Math.round((vpHeight - (contentMinY + contentMaxY) * currentScale) / 2);
 
-    // Canvas extents are at least the viewport canvas size, expanding outward as elements extend
-    const maxX = Math.max(
-      vpCanvasW,
-      (maxElX > -Infinity ? maxElX : 0) + HEADROOM
-    );
-    const maxY = Math.max(
-      vpCanvasH,
-      (maxElY > -Infinity ? maxElY : 0) + HEADROOM
-    );
+    const isDesktop = !isTouchPrimary() && !isPhoneScreen();
+    const isPhone = isPhoneScreen();
 
-    const maxPanX = -minX * currentScale;
-    const minPanX = vpWidth - maxX * currentScale;
-    const maxPanY = -minY * currentScale;
-    const minPanY = vpHeight - maxY * currentScale;
+    // Desktop: ONLY disable panning when FULLY zoomed out (scale <= 0.22).
+    // At normal zoom levels (scale > 0.22), allow full, generous panning across the board workspace!
+    if (isDesktop) {
+      if (currentScale <= 0.22) {
+        return {
+          bounds: { minX: contentMinX, maxX: contentMaxX, minY: contentMinY, maxY: contentMaxY },
+          panLimits: { minPanX: centerPanX, maxPanX: centerPanX, minPanY: centerPanY, maxPanY: centerPanY },
+          centerPan: { x: centerPanX, y: centerPanY },
+          contentDimensions: {
+            screenW: (contentMaxX - contentMinX) * currentScale,
+            screenH: (contentMaxY - contentMinY) * currentScale,
+          },
+        };
+      }
+
+      // Generous desktop workspace extents for free panning at normal zoom levels
+      const HEADROOM_X = 600;
+      const HEADROOM_Y = 500;
+      const boardMinX = Math.min(0, contentMinX - HEADROOM_X);
+      const boardMaxX = Math.max(1600, contentMaxX + HEADROOM_X);
+      const boardMinY = Math.min(0, contentMinY - HEADROOM_Y);
+      const boardMaxY = Math.max(1200, contentMaxY + HEADROOM_Y);
+
+      // Smooth blend factor as scale approaches fully zoomed out (0.22)
+      const blend = Math.min(1, Math.max(0, (currentScale - 0.22) / 0.12));
+
+      const rawMinPanX = Math.round(vpWidth - boardMaxX * currentScale);
+      const rawMaxPanX = Math.round(-boardMinX * currentScale);
+      const rawMinPanY = Math.round(vpHeight - boardMaxY * currentScale);
+      const rawMaxPanY = Math.round(-boardMinY * currentScale);
+
+      const minPanX = Math.round(centerPanX + (rawMinPanX - centerPanX) * blend);
+      const maxPanX = Math.round(centerPanX + (rawMaxPanX - centerPanX) * blend);
+      const minPanY = Math.round(centerPanY + (rawMinPanY - centerPanY) * blend);
+      const maxPanY = Math.round(centerPanY + (rawMaxPanY - centerPanY) * blend);
+
+      return {
+        bounds: { minX: boardMinX, maxX: boardMaxX, minY: boardMinY, maxY: boardMaxY },
+        panLimits: {
+          minPanX: Math.min(minPanX, maxPanX),
+          maxPanX: Math.max(minPanX, maxPanX),
+          minPanY: Math.min(minPanY, maxPanY),
+          maxPanY: Math.max(minPanY, maxPanY),
+        },
+        centerPan: { x: centerPanX, y: centerPanY },
+        contentDimensions: {
+          screenW: (contentMaxX - contentMinX) * currentScale,
+          screenH: (contentMaxY - contentMinY) * currentScale,
+        },
+      };
+    }
+
+    // Android Phone & Tablet:
+    // Increased usable canvas size with generous headroom around content
+    const padX = isPhone ? 12 : 24;
+    const padY = isPhone ? 12 : 24;
+
+    const marginHeadroomX = isPhone ? 450 : 650;
+    const marginHeadroomY = isPhone ? 400 : 550;
+    const minCanvasW = isPhone ? 1200 : 1600;
+    const minCanvasH = isPhone ? 1000 : 1300;
+
+    const boardMinX = Math.min(0, contentMinX - marginHeadroomX);
+    const boardMaxX = Math.max(minCanvasW, contentMaxX + marginHeadroomX);
+    const boardMinY = Math.min(0, contentMinY - marginHeadroomY);
+    const boardMaxY = Math.max(minCanvasH, contentMaxY + marginHeadroomY);
+
+    const contentScreenW = (contentMaxX - contentMinX) * currentScale;
+    const contentScreenH = (contentMaxY - contentMinY) * currentScale;
+
+    // Smooth bounded pan travel on phone/tablet: content cannot leave screen when zoomed out,
+    // with generous travel room when navigating or zoomed in
+    const availX = (vpWidth - 2 * padX) - contentScreenW;
+    const extraMarginX = availX < 0
+      ? Math.min(marginHeadroomX * currentScale, -availX * 0.45)
+      : Math.min(100, availX * 0.25);
+    const halfSpanX = Math.abs(availX) / 2 + extraMarginX;
+    const minPanX = Math.round(centerPanX - halfSpanX);
+    const maxPanX = Math.round(centerPanX + halfSpanX);
+
+    const availY = (vpHeight - 2 * padY) - contentScreenH;
+    const extraMarginY = availY < 0
+      ? Math.min(marginHeadroomY * currentScale, -availY * 0.45)
+      : Math.min(100, availY * 0.25);
+    const halfSpanY = Math.abs(availY) / 2 + extraMarginY;
+    const minPanY = Math.round(centerPanY - halfSpanY);
+    const maxPanY = Math.round(centerPanY + halfSpanY);
 
     return {
-      bounds: { minX, maxX, minY, maxY },
+      bounds: { minX: boardMinX, maxX: boardMaxX, minY: boardMinY, maxY: boardMaxY },
       panLimits: {
         minPanX: Math.min(minPanX, maxPanX),
         maxPanX: Math.max(minPanX, maxPanX),
         minPanY: Math.min(minPanY, maxPanY),
         maxPanY: Math.max(minPanY, maxPanY),
-      }
+      },
+      centerPan: { x: centerPanX, y: centerPanY },
+      contentDimensions: { screenW: contentScreenW, screenH: contentScreenH },
     };
   }, [elements]);
 
   const clampPan = useCallback((x: number, y: number, currentScale = scale) => {
     if (!containerRef.current) return { x, y };
     const rect = containerRef.current.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return { x, y };
     const { panLimits } = getPanLimits(rect.width, rect.height, currentScale);
-    const clampedX = Math.min(Math.max(x, panLimits.minPanX), panLimits.maxPanX);
-    const clampedY = Math.min(Math.max(y, panLimits.minPanY), panLimits.maxPanY);
+
+    const clampedX = Math.round(Math.min(Math.max(x, panLimits.minPanX), panLimits.maxPanX));
+    const clampedY = Math.round(Math.min(Math.max(y, panLimits.minPanY), panLimits.maxPanY));
     return { x: clampedX, y: clampedY };
   }, [getPanLimits, scale]);
 
+  const computeZoomPan = useCallback((
+    newScale: number,
+    anchor: { x: number; y: number },
+    basePan: { x: number; y: number },
+    baseScale: number
+  ) => {
+    // Canvas point under anchor at base state
+    const canvasX = (anchor.x - basePan.x) / baseScale;
+    const canvasY = (anchor.y - basePan.y) / baseScale;
+
+    // Focal pan that keeps the canvas point exactly under anchor at newScale
+    const focalPanX = Math.round(anchor.x - canvasX * newScale);
+    const focalPanY = Math.round(anchor.y - canvasY * newScale);
+
+    if (!containerRef.current) return { x: focalPanX, y: focalPanY };
+    const rect = containerRef.current.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return { x: focalPanX, y: focalPanY };
+
+    const { centerPan, contentDimensions } = getPanLimits(rect.width, rect.height, newScale);
+    const padX = isPhoneScreen() ? 16 : 36;
+    const padY = isPhoneScreen() ? 16 : 36;
+
+    // On desktop, as the canvas is zoomed out and content fits inside the viewport (or approaches min zoom),
+    // smoothly converge the focal point to the viewport center so elements effortlessly zoom out to the center!
+    const isDesktop = !isTouchPrimary() && !isPhoneScreen();
+    let targetX = focalPanX;
+    let targetY = focalPanY;
+
+    if (isDesktop) {
+      const availW = Math.max(1, rect.width - 2 * padX);
+      const availH = Math.max(1, rect.height - 2 * padY);
+      const ratioX = Math.max(0, Math.min(1, contentDimensions.screenW / availW));
+      const ratioY = Math.max(0, Math.min(1, contentDimensions.screenH / availH));
+
+      // Ease towards centerPan as content gets smaller than viewport:
+      targetX = Math.round(centerPan.x + (focalPanX - centerPan.x) * ratioX);
+      targetY = Math.round(centerPan.y + (focalPanY - centerPan.y) * ratioY);
+    }
+
+    return clampPan(targetX, targetY, newScale);
+  }, [clampPan, getPanLimits]);
+
+  // Dynamic pan adjustment when zoom scale changes externally (e.g. zoom buttons/slider/scale-to-fit)
+  const prevScaleRef = useRef(scale);
+  useEffect(() => {
+    if (prevScaleRef.current !== scale) {
+      const oldScale = prevScaleRef.current;
+      prevScaleRef.current = scale;
+      scaleRef.current = scale;
+      // Only adjust pan if scale was changed externally (not by our own zoom animation loop/pinch)
+      if (Math.abs(scale - lastInternalScaleSetRef.current) > 0.002) {
+        lastInternalScaleSetRef.current = scale;
+        triggerZoomOsd(scale);
+        if (containerRef.current) {
+          const rect = containerRef.current.getBoundingClientRect();
+          const anchor = { x: rect.width / 2, y: rect.height / 2 };
+          setPan((prev) => computeZoomPan(scale, anchor, prev, oldScale));
+        }
+      }
+    }
+  }, [scale, computeZoomPan, triggerZoomOsd]);
+
+  // Window resize handling
+  useEffect(() => {
+    const handleWindowResize = () => {
+      if (containerRef.current) {
+        setPan((prev) => clampPan(prev.x, prev.y, scaleRef.current));
+      }
+    };
+    window.addEventListener('resize', handleWindowResize);
+    return () => window.removeEventListener('resize', handleWindowResize);
+  }, [clampPan]);
+
+  // Clean up any running zoom animation and timer on unmount
+  useEffect(() => {
+    return () => {
+      if (zoomRafRef.current) {
+        cancelAnimationFrame(zoomRafRef.current);
+      }
+      if (zoomOsdTimerRef.current !== null) {
+        clearTimeout(zoomOsdTimerRef.current);
+      }
+    };
+  }, []);
+
+  // Spacebar pan key listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.code === 'Space' || e.key === ' ') {
+        const activeEl = document.activeElement as HTMLElement | null;
+        const isTyping = activeEl && (
+          activeEl.tagName === 'INPUT' ||
+          activeEl.tagName === 'TEXTAREA' ||
+          activeEl.isContentEditable ||
+          Boolean(activeEl.closest('[contenteditable="true"]'))
+        );
+        if (isTyping || editingElementId) return;
+
+        // Prevent default browser scrolling
+        e.preventDefault();
+        if (!isSpacePressedRef.current) {
+          isSpacePressedRef.current = true;
+          setIsSpacePressed(true);
+        }
+      }
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.code === 'Space' || e.key === ' ') {
+        isSpacePressedRef.current = false;
+        setIsSpacePressed(false);
+      }
+    };
+
+    const handleBlur = () => {
+      isSpacePressedRef.current = false;
+      setIsSpacePressed(false);
+    };
+
+    window.addEventListener('keydown', handleKeyDown, { passive: false });
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleBlur);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleBlur);
+    };
+  }, [editingElementId]);
+
   const scrollbarMetrics = useMemo(() => {
-    if (!containerRef.current) {
+    if (!containerRef.current || isTouchPrimary() || isPhoneScreen()) {
       return {
         showH: false,
         showV: false,
@@ -886,37 +1442,36 @@ export const Canvas: React.FC<CanvasProps> = ({
       };
     }
     const rect = containerRef.current.getBoundingClientRect();
-    const { bounds } = getPanLimits(rect.width, rect.height, scale);
-    
-    const vpW = rect.width / scale;
-    const vpH = rect.height / scale;
-    const totalContentW = Math.max(bounds.maxX - bounds.minX, vpW);
-    const totalContentH = Math.max(bounds.maxY - bounds.minY, vpH);
-    const maxScrollX = totalContentW - vpW;
-    const maxScrollY = totalContentH - vpH;
+    const { panLimits } = getPanLimits(rect.width, rect.height, scale);
 
-    const currentLeft = -pan.x / scale;
-    const currentTop = -pan.y / scale;
+    const totalPanTravelX = panLimits.maxPanX - panLimits.minPanX;
+    const totalPanTravelY = panLimits.maxPanY - panLimits.minPanY;
 
-    const progressX = maxScrollX > 1 
-      ? Math.max(0, Math.min(1, (currentLeft - bounds.minX) / maxScrollX))
+    // Only show scrollbars if there is significant scrollable travel and scale > 0.35
+    const showH = totalPanTravelX > 20 && scale > 0.35;
+    const showV = totalPanTravelY > 20 && scale > 0.35;
+
+    // Progress: 0 at maxPanX (leftmost), 1 at minPanX (rightmost)
+    const progressX = totalPanTravelX > 0
+      ? Math.max(0, Math.min(1, (panLimits.maxPanX - pan.x) / totalPanTravelX))
       : 0;
-    const progressY = maxScrollY > 1
-      ? Math.max(0, Math.min(1, (currentTop - bounds.minY) / maxScrollY))
+    const progressY = totalPanTravelY > 0
+      ? Math.max(0, Math.min(1, (panLimits.maxPanY - pan.y) / totalPanTravelY))
       : 0;
 
-    const thumbRatioX = Math.max(0.05, Math.min(1, vpW / totalContentW));
-    const thumbRatioY = Math.max(0.05, Math.min(1, vpH / totalContentH));
+    // Thumb size proportional to viewport relative to total scrollable space
+    const thumbRatioX = Math.max(0.08, Math.min(0.85, rect.width / (rect.width + totalPanTravelX)));
+    const thumbRatioY = Math.max(0.08, Math.min(0.85, rect.height / (rect.height + totalPanTravelY)));
 
     const thumbWidthPct = thumbRatioX * 100;
-    const thumbLeftPct = progressX * (1 - thumbRatioX) * 100;
+    const thumbLeftPct = progressX * (100 - thumbWidthPct);
 
     const thumbHeightPct = thumbRatioY * 100;
-    const thumbTopPct = progressY * (1 - thumbRatioY) * 100;
+    const thumbTopPct = progressY * (100 - thumbHeightPct);
 
     return {
-      showH: maxScrollX > 20,
-      showV: maxScrollY > 20,
+      showH,
+      showV,
       thumbLeftPct,
       thumbWidthPct,
       thumbTopPct,
@@ -929,23 +1484,23 @@ export const Canvas: React.FC<CanvasProps> = ({
     e.preventDefault();
     if (!containerRef.current) return;
     const rect = containerRef.current.getBoundingClientRect();
-    const { bounds, panLimits } = getPanLimits(rect.width, rect.height, scale);
+    const { panLimits } = getPanLimits(rect.width, rect.height, scale);
 
     if (axis === 'h') {
-      const trackLength = rect.width - 6;
-      const totalContentW = Math.max(bounds.maxX - bounds.minX, rect.width / scale);
-      const thumbRatioX = Math.max(0.05, Math.min(1, (rect.width / scale) / totalContentW));
-      const thumbLength = Math.max(thumbRatioX * trackLength, 20);
+      const trackLength = rect.width;
+      const totalPanTravel = panLimits.maxPanX - panLimits.minPanX;
+      if (totalPanTravel <= 0) return;
+      const thumbRatioX = Math.max(0.08, Math.min(0.85, rect.width / (rect.width + totalPanTravel)));
+      const thumbLength = thumbRatioX * trackLength;
       const availableTrack = Math.max(trackLength - thumbLength, 1);
-      const maxPanTravel = panLimits.maxPanX - panLimits.minPanX;
 
       const isThumb = (e.target as HTMLElement).classList.contains('canvas-scrollbar-thumb');
       let startPan = pan.x;
       if (!isThumb) {
         const trackRect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-        const clickOffset = e.clientX - trackRect.left - thumbLength / 2;
-        const targetProgress = Math.max(0, Math.min(1, clickOffset / availableTrack));
-        startPan = clampPan(panLimits.maxPanX - targetProgress * maxPanTravel, pan.y).x;
+        const clickOffset = Math.max(0, Math.min(availableTrack, e.clientX - trackRect.left - thumbLength / 2));
+        const targetProgress = clickOffset / availableTrack;
+        startPan = clampPan(panLimits.maxPanX - targetProgress * totalPanTravel, pan.y).x;
         setPan((prev) => ({ ...prev, x: startPan }));
       }
 
@@ -954,23 +1509,23 @@ export const Canvas: React.FC<CanvasProps> = ({
         startMouse: e.clientX,
         startPan,
         availableTrack,
-        maxPanTravel,
+        maxPanTravel: totalPanTravel,
       };
     } else {
-      const trackLength = rect.height - 6;
-      const totalContentH = Math.max(bounds.maxY - bounds.minY, rect.height / scale);
-      const thumbRatioY = Math.max(0.05, Math.min(1, (rect.height / scale) / totalContentH));
-      const thumbLength = Math.max(thumbRatioY * trackLength, 20);
+      const trackLength = rect.height;
+      const totalPanTravel = panLimits.maxPanY - panLimits.minPanY;
+      if (totalPanTravel <= 0) return;
+      const thumbRatioY = Math.max(0.08, Math.min(0.85, rect.height / (rect.height + totalPanTravel)));
+      const thumbLength = thumbRatioY * trackLength;
       const availableTrack = Math.max(trackLength - thumbLength, 1);
-      const maxPanTravel = panLimits.maxPanY - panLimits.minPanY;
 
       const isThumb = (e.target as HTMLElement).classList.contains('canvas-scrollbar-thumb');
       let startPan = pan.y;
       if (!isThumb) {
         const trackRect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-        const clickOffset = e.clientY - trackRect.top - thumbLength / 2;
-        const targetProgress = Math.max(0, Math.min(1, clickOffset / availableTrack));
-        startPan = clampPan(pan.x, panLimits.maxPanY - targetProgress * maxPanTravel).y;
+        const clickOffset = Math.max(0, Math.min(availableTrack, e.clientY - trackRect.top - thumbLength / 2));
+        const targetProgress = clickOffset / availableTrack;
+        startPan = clampPan(pan.x, panLimits.maxPanY - targetProgress * totalPanTravel).y;
         setPan((prev) => ({ ...prev, y: startPan }));
       }
 
@@ -979,7 +1534,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         startMouse: e.clientY,
         startPan,
         availableTrack,
-        maxPanTravel,
+        maxPanTravel: totalPanTravel,
       };
     }
   }, [getPanLimits, pan.x, pan.y, scale, clampPan]);
@@ -1091,31 +1646,141 @@ export const Canvas: React.FC<CanvasProps> = ({
     return { main, startSegment, endSegment, vertex, p0, p2 };
   }, []);
 
+  const runZoomAnimationTick = useCallback(() => {
+    if (targetScaleRef.current === null || !containerRef.current) {
+      zoomRafRef.current = null;
+      isZoomingRef.current = false;
+      zoomOriginRef.current = null;
+      return;
+    }
+
+    const targetScale = targetScaleRef.current;
+    const currentScale = scaleRef.current;
+    const diff = targetScale - currentScale;
+
+    const rect = containerRef.current.getBoundingClientRect();
+    const anchor = zoomAnchorRef.current || { x: rect.width / 2, y: rect.height / 2 };
+    const origin = zoomOriginRef.current || { scale: currentScale, pan: panRef.current };
+
+    if (Math.abs(diff) < 0.0015) {
+      const finalScale = targetScale;
+      targetScaleRef.current = null;
+      zoomRafRef.current = null;
+      zoomOriginRef.current = null;
+
+      const finalPan = computeZoomPan(finalScale, anchor, origin.pan, origin.scale);
+
+      scaleRef.current = finalScale;
+      panRef.current = finalPan;
+      lastInternalScaleSetRef.current = finalScale;
+      onSetScale(Number(finalScale.toFixed(3)));
+      setPan(finalPan);
+      triggerZoomOsd(finalScale);
+
+      requestAnimationFrame(() => {
+        isZoomingRef.current = false;
+      });
+      return;
+    }
+
+    // Spring/lerp interpolation factor: 0.22 per frame delivers silky smooth easing
+    const LERP = 0.22;
+    const nextScale = currentScale + diff * LERP;
+    const nextPan = computeZoomPan(nextScale, anchor, origin.pan, origin.scale);
+
+    scaleRef.current = nextScale;
+    panRef.current = nextPan;
+    lastInternalScaleSetRef.current = nextScale;
+    onSetScale(Number(nextScale.toFixed(3)));
+    setPan(nextPan);
+    triggerZoomOsd(nextScale);
+
+    zoomRafRef.current = requestAnimationFrame(runZoomAnimationTick);
+  }, [computeZoomPan, onSetScale, triggerZoomOsd]);
+
   const handleWheel = useCallback((e: React.WheelEvent) => {
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
-      const zoomFactor = -e.deltaY * 0.0015;
-      const newScale = Math.min(Math.max(scale + zoomFactor, 0.25), 3.0);
+      if (!containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left;
+      const mouseY = e.clientY - rect.top;
 
-      if (containerRef.current) {
-        const rect = containerRef.current.getBoundingClientRect();
-        const mouseX = e.clientX - rect.left;
-        const mouseY = e.clientY - rect.top;
+      // Exponential zoom scaling: smooth scaling relative to mouse scroll intensity
+      const delta = Math.max(-200, Math.min(200, e.deltaY));
+      const zoomFactor = Math.exp(-delta * 0.002);
 
-        const scaleRatio = newScale / scale;
-        const newPanX = mouseX - (mouseX - pan.x) * scaleRatio;
-        const newPanY = mouseY - (mouseY - pan.y) * scaleRatio;
+      const baseTarget = targetScaleRef.current ?? scaleRef.current;
+      let newTarget = Math.min(3.0, Math.max(0.15, baseTarget * zoomFactor));
 
-        onSetScale(newScale);
-        setPan(clampPan(newPanX, newPanY, newScale));
+      // Magnetic snap to 100% (1.000):
+      // If crossing or approaching 1.0 within a snap threshold (0.94 to 1.06)
+      const SNAP_MIN = 0.94;
+      const SNAP_MAX = 1.06;
+      const isCrossing = (baseTarget < 1.0 && newTarget >= 1.0) || (baseTarget > 1.0 && newTarget <= 1.0);
+      const isNear100 = newTarget >= SNAP_MIN && newTarget <= SNAP_MAX;
+
+      if (Math.abs(baseTarget - 1.0) < 0.005) {
+        // Already at 1.0. User must scroll with significant intent to break out of the snap
+        if (Math.abs(delta) > 50) {
+          newTarget = delta < 0 ? 1.15 : 0.85;
+        } else {
+          newTarget = 1.0;
+        }
+      } else if (isCrossing || isNear100) {
+        newTarget = 1.0;
+        if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+          try { navigator.vibrate(12); } catch (_) {}
+        }
+      }
+
+      newTarget = Number(newTarget.toFixed(3));
+      targetScaleRef.current = newTarget;
+      zoomAnchorRef.current = { x: mouseX, y: mouseY };
+
+      // Initialize or update zoom origin relative to current state
+      zoomOriginRef.current = {
+        scale: scaleRef.current,
+        pan: { ...panRef.current },
+      };
+      isZoomingRef.current = true;
+
+      // Immediately display OSD with target
+      triggerZoomOsd(newTarget);
+
+      if (!zoomRafRef.current) {
+        zoomRafRef.current = requestAnimationFrame(runZoomAnimationTick);
       }
     } else {
       e.preventDefault();
+      if (zoomRafRef.current) {
+        cancelAnimationFrame(zoomRafRef.current);
+        zoomRafRef.current = null;
+        targetScaleRef.current = null;
+        zoomOriginRef.current = null;
+        isZoomingRef.current = false;
+      }
       setPan((prev) => clampPan(prev.x - e.deltaX, prev.y - e.deltaY));
     }
-  }, [scale, pan.x, pan.y, onSetScale, clampPan]);
+  }, [clampPan, runZoomAnimationTick, triggerZoomOsd]);
 
   const handlePointerDown = (e: React.PointerEvent | React.MouseEvent) => {
+    const nowDown = Date.now();
+    if (e.type === 'mousedown' && nowDown - lastCanvasDownTimeRef.current < 250) {
+      return;
+    }
+    lastCanvasDownTimeRef.current = nowDown;
+
+    if (zoomRafRef.current) {
+      cancelAnimationFrame(zoomRafRef.current);
+      zoomRafRef.current = null;
+      targetScaleRef.current = null;
+      zoomOriginRef.current = null;
+      isZoomingRef.current = false;
+    }
+    if (Date.now() - lastPinchEndTimeRef.current < 300 || pinchStateRef.current || pointersRef.current.size >= 2) {
+      return;
+    }
     if (activeInlineComment) setActiveInlineComment(null);
     const target = e.target as HTMLElement;
     const isCanvasBg = target === containerRef.current || target.classList.contains('canvas-viewport') || target.classList.contains('canvas-plane') || target.classList.contains('canvas-viewport-grid');
@@ -1163,65 +1828,146 @@ export const Canvas: React.FC<CanvasProps> = ({
 
     if (ptr.pointerType === 'touch') {
       if (pointersRef.current.size === 1 && isCanvasBg) {
-        // Single touch on canvas: initiate touch panning
-        setIsPanning(true);
-        panStartRef.current = { x: e.clientX, y: e.clientY, startPanX: pan.x, startPanY: pan.y };
         onSelectElement(null);
         onSetEditingElement(null);
         if (onMultiSelect) onMultiSelect([]);
         onCanvasClick?.();
+
+        const now = Date.now();
+        const isDoubleTap = Boolean(
+          lastTouchTapRef.current &&
+          (now - lastTouchTapRef.current.time < 380) &&
+          (Math.hypot(e.clientX - lastTouchTapRef.current.x, e.clientY - lastTouchTapRef.current.y) < 35)
+        );
+
+        if (isDoubleTap) {
+          if (touchHoldTimerRef.current) {
+            clearTimeout(touchHoldTimerRef.current);
+            touchHoldTimerRef.current = null;
+          }
+          isTouchSelectingRef.current = true;
+          setIsPanning(false);
+          selectionInitialIdsRef.current = [];
+          const pos = screenToCanvas(e.clientX, e.clientY);
+          const newBox = { startX: pos.x, startY: pos.y, currentX: pos.x, currentY: pos.y };
+          setSelectionBox(newBox);
+          selectionRef.current = newBox;
+          if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+            try { navigator.vibrate(25); } catch (_) {}
+          }
+          return;
+        }
+
+        // Set up pan start reference
+        panStartRef.current = { x: e.clientX, y: e.clientY, startPanX: pan.x, startPanY: pan.y };
+        touchHoldStartPosRef.current = { clientX: e.clientX, clientY: e.clientY };
+        isTouchSelectingRef.current = false;
+
+        // Long-press hold timer (200ms) to trigger marquee selection
+        if (touchHoldTimerRef.current) clearTimeout(touchHoldTimerRef.current);
+        touchHoldTimerRef.current = setTimeout(() => {
+          touchHoldTimerRef.current = null;
+          isTouchSelectingRef.current = true;
+          setIsPanning(false);
+          selectionInitialIdsRef.current = [];
+          const pos = screenToCanvas(e.clientX, e.clientY);
+          const newBox = { startX: pos.x, startY: pos.y, currentX: pos.x, currentY: pos.y };
+          setSelectionBox(newBox);
+          selectionRef.current = newBox;
+          if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+            try { navigator.vibrate(30); } catch (_) {}
+          }
+        }, 200);
+
         return;
       }
 
       if (pointersRef.current.size === 2) {
+        if (touchHoldTimerRef.current) {
+          clearTimeout(touchHoldTimerRef.current);
+          touchHoldTimerRef.current = null;
+        }
+        isTouchSelectingRef.current = false;
+        if (selectionRef.current) {
+          selectionRef.current = null;
+          setSelectionBox(null);
+        }
         // Two fingers: Pinch-to-zoom & two-finger tap detection
         setIsPanning(false);
         const pts = Array.from(pointersRef.current.values());
-        const dist = Math.hypot(pts[0].clientX - pts[1].clientX, pts[0].clientY - pts[1].clientY);
-        const midX = (pts[0].clientX + pts[1].clientX) / 2;
-        const midY = (pts[0].clientY + pts[1].clientY) / 2;
-        pinchStateRef.current = {
-          initialDist: dist,
-          initialScale: scale,
-          initialPan: { ...pan },
-          initialMidpoint: { x: midX, y: midY },
-        };
-        twoFingerTapRef.current = {
-          startTime: Date.now(),
-          startX: midX,
-          startY: midY,
-          moved: false,
-        };
+        if (containerRef.current) {
+          const rect = containerRef.current.getBoundingClientRect();
+          const dist = Math.hypot(pts[0].clientX - pts[1].clientX, pts[0].clientY - pts[1].clientY);
+          const midX = (pts[0].clientX + pts[1].clientX) / 2 - rect.left;
+          const midY = (pts[0].clientY + pts[1].clientY) / 2 - rect.top;
+
+          const currentScale = scaleRef.current;
+          const currentPan = panRef.current;
+          const focalCanvasX = (midX - currentPan.x) / currentScale;
+          const focalCanvasY = (midY - currentPan.y) / currentScale;
+
+          pinchStateRef.current = {
+            initialDist: dist,
+            initialScale: currentScale,
+            focalCanvasX,
+            focalCanvasY,
+          };
+          twoFingerTapRef.current = {
+            startTime: Date.now(),
+            startX: (pts[0].clientX + pts[1].clientX) / 2,
+            startY: (pts[0].clientY + pts[1].clientY) / 2,
+            moved: false,
+          };
+        }
         return;
       }
     }
 
-    if (isCanvasBg) {
+    if (ptr.pointerType === 'pen' && isCanvasBg) {
+      onSelectElement(null);
+      onSetEditingElement(null);
+      if (onMultiSelect) onMultiSelect([]);
       onCanvasClick?.();
-      if (e.button === 1 || e.buttons === 4 || ((e.ctrlKey || e.metaKey) && e.button === 0)) {
+      const pos = screenToCanvas(e.clientX, e.clientY);
+      const newBox = { startX: pos.x, startY: pos.y, currentX: pos.x, currentY: pos.y };
+      setSelectionBox(newBox);
+      selectionRef.current = newBox;
+      return;
+    }
+
+    if (isCanvasBg) {
+      // 1. Middle-click or Spacebar + Left Click = PANNING
+      if (e.button === 1 || e.buttons === 4 || (isSpacePressedRef.current && e.button === 0)) {
         e.preventDefault();
         setIsPanning(true);
         panStartRef.current = { x: e.clientX, y: e.clientY, startPanX: pan.x, startPanY: pan.y };
-        onSelectElement(null);
-        onSetEditingElement(null);
         return;
       }
 
-      if (e.button === 0 && !e.ctrlKey && !e.metaKey) {
+      // 2. Left Click on canvas background = START SELECTION BOX
+      if (e.button === 0) {
         e.preventDefault();
-        onSelectElement(null);
-        onSetEditingElement(null);
-        if (onMultiSelect) onMultiSelect([]);
+        const isCtrl = e.ctrlKey || e.metaKey;
+        if (!isCtrl) {
+          onSelectElement(null);
+          if (onMultiSelect) onMultiSelect([]);
+          onCanvasClick?.();
+          selectionInitialIdsRef.current = [];
+          lastDispatchedSelectedRef.current = [];
+        } else {
+          const currentSelected = selectedIds.length > 0 ? [...selectedIds] : (selectedElementId ? [selectedElementId] : []);
+          selectionInitialIdsRef.current = currentSelected;
+          lastDispatchedSelectedRef.current = [...currentSelected];
+        }
 
         const pos = screenToCanvas(e.clientX, e.clientY);
         const newBox = { startX: pos.x, startY: pos.y, currentX: pos.x, currentY: pos.y };
         setSelectionBox(newBox);
         selectionRef.current = newBox;
+        return;
       }
     }
   };
-
-  const handleMouseDown = handlePointerDown;
 
   const handleDoubleClick = (e: React.MouseEvent) => {
     const target = e.target as HTMLElement;
@@ -1298,12 +2044,19 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
     setDragOverTaskListId(foundTaskListId);
 
-    const unsortedBtn = document.querySelector('.unsorted-pill-btn');
+    const unsortedBtn = document.querySelector('.unsorted-pill-btn') || document.querySelector('.mobile-unsorted-floating-pill');
     const drawerEl = document.querySelector('.unsorted-drawer');
+    const quickNotesBtn = document.querySelector('.mobile-tab-btn[title="Quick notes"]') || document.querySelector('.mobile-tab-btn:nth-child(2)');
     let overUnsorted = false;
     if (unsortedBtn) {
       const uRect = unsortedBtn.getBoundingClientRect();
       if (clientX >= uRect.left && clientX <= uRect.right && clientY >= uRect.top && clientY <= uRect.bottom) {
+        overUnsorted = true;
+      }
+    }
+    if (quickNotesBtn) {
+      const qRect = quickNotesBtn.getBoundingClientRect();
+      if (clientX >= qRect.left && clientX <= qRect.right && clientY >= qRect.top && clientY <= qRect.bottom) {
         overUnsorted = true;
       }
     }
@@ -1399,23 +2152,45 @@ export const Canvas: React.FC<CanvasProps> = ({
         return;
       }
 
-      // Smooth trailing interpolation with an ever-so-slight physical lag wrt cursor (0.32 lerp factor)
-      const LERP_FACTOR = 0.32;
-      drag.currentDx += (drag.targetDx - drag.currentDx) * LERP_FACTOR;
-      drag.currentDy += (drag.targetDy - drag.currentDy) * LERP_FACTOR;
+      // Direct 1:1 tracking: eliminates artificial position lag so cards feel snappy and responsive
+      drag.currentDx = drag.targetDx;
+      drag.currentDy = drag.targetDy;
 
-      if (Math.abs(drag.targetDx - drag.currentDx) < 0.1) drag.currentDx = drag.targetDx;
-      if (Math.abs(drag.targetDy - drag.currentDy) < 0.1) drag.currentDy = drag.targetDy;
+      const isDesktop = !isTouchPrimary() && !isPhoneScreen();
+
+      // Smooth physical dynamic tilt with velocity-decay filtering (immune to USB mouse polling jitter)
+      if (isDesktop) {
+        const now = performance.now();
+        const timeSinceMove = now - (drag.lastMoveTime || now);
+        if (timeSinceMove > 40) {
+          drag.smoothVx = (drag.smoothVx || 0) * 0.65;
+          if (Math.abs(drag.smoothVx) < 0.05) drag.smoothVx = 0;
+        }
+        const targetTilt = Math.max(-1.5, Math.min(1.5, (drag.smoothVx || 0) * 0.08));
+        drag.currentTilt = (drag.currentTilt || 0) * 0.8 + targetTilt * 0.2;
+        if (Math.abs(drag.currentTilt) < 0.01) {
+          drag.currentTilt = 0;
+        }
+      } else {
+        drag.currentTilt = 0;
+      }
+      const tiltDeg = isDesktop ? (drag.currentTilt || 0).toFixed(2) : '0';
 
       drag.dragGroup.forEach((item) => {
         const elDiv = document.getElementById(`milanote-el-${item.id}`);
         if (elDiv) {
           if (drag.isFromColumn && item.id === drag.elementId) {
+            const cPos = screenToCanvas(drag.clientX - drag.offsetX, drag.clientY - drag.offsetY);
+            item.currentX = Number(cPos.x.toFixed(1));
+            item.currentY = Number(cPos.y.toFixed(1));
             elDiv.style.position = 'fixed';
             elDiv.style.left = `${drag.clientX - drag.offsetX}px`;
             elDiv.style.top = `${drag.clientY - drag.offsetY}px`;
             elDiv.style.zIndex = '999999';
-            elDiv.style.transform = 'none';
+            const colTransform = isDesktop
+              ? `scale(1.02) rotate(${tiltDeg}deg)`
+              : 'none';
+            elDiv.style.transform = colTransform;
             if (elDiv.classList.contains('column-board-row')) {
               elDiv.style.width = '240px';
             } else if (item.elementType === 'image') {
@@ -1423,28 +2198,25 @@ export const Canvas: React.FC<CanvasProps> = ({
               elDiv.style.height = `${item.origHeight || 220}px`;
             }
           } else {
-            const newX = Math.round(item.origX + drag.currentDx);
-            const newY = Math.round(item.origY + drag.currentDy);
+            const newX = Number((item.origX + drag.currentDx).toFixed(1));
+            const newY = Number((item.origY + drag.currentDy).toFixed(1));
             item.currentX = newX;
             item.currentY = newY;
-            elDiv.style.transform = `translate(${newX}px, ${newY}px)`;
-            elDiv.style.left = '0px';
-            elDiv.style.top = '0px';
-            const portalDiv = document.getElementById(`milanote-drag-portal-${item.id}`);
-            if (portalDiv) {
-              const scr = canvasToScreen(newX, newY);
-              portalDiv.style.left = `${scr.x}px`;
-              portalDiv.style.top = `${scr.y}px`;
-              portalDiv.style.transform = `scale(${scale})`;
-            }
+            const animTransform = isDesktop
+              ? `translate3d(${newX}px, ${newY}px, 0) scale(1.02) rotate(${tiltDeg}deg)`
+              : `translate3d(${newX}px, ${newY}px, 0)`;
+            elDiv.style.transform = animTransform;
+            elDiv.style.transformOrigin = 'center center';
           }
         }
       });
 
       checkDragTargets(drag.clientX, drag.clientY, drag.elementId, drag.dragGroup);
+      if (lineElements.length > 0) {
+        setDragTick((t) => (t + 1) % 1000000);
+      }
 
-      const stillInterpolating = Math.abs(drag.targetDx - drag.currentDx) >= 0.1 || Math.abs(drag.targetDy - drag.currentDy) >= 0.1;
-      if (dragRef.current || stillInterpolating) {
+      if (dragRef.current) {
         dragRafRef.current = requestAnimationFrame(tick);
       } else {
         dragRafRef.current = null;
@@ -1452,10 +2224,14 @@ export const Canvas: React.FC<CanvasProps> = ({
     };
 
     dragRafRef.current = requestAnimationFrame(tick);
-  }, [canvasToScreen, checkDragTargets, scale]);
+  }, [canvasToScreen, screenToCanvas, checkDragTargets, scale, lineElements]);
 
   const handleMouseMove = useCallback((e: MouseEvent | PointerEvent) => {
     const ptr = e as PointerEvent;
+    const isTouch = (ptr.pointerType === 'touch') || isTouchPrimary();
+    if (isTouch && Date.now() - lastPinchEndTimeRef.current < 300) {
+      return;
+    }
     if (ptr.pointerId !== undefined && pointersRef.current.has(ptr.pointerId)) {
       pointersRef.current.set(ptr.pointerId, {
         clientX: e.clientX,
@@ -1464,65 +2240,47 @@ export const Canvas: React.FC<CanvasProps> = ({
       });
     }
 
-    // Two-finger pinch-to-zoom & two-finger pan
-    if (pointersRef.current.size >= 2 && pinchStateRef.current) {
+    // Two-finger pinch-to-zoom & two-finger pan (skips touch since onTouchMove handles it atomically)
+    if (pointersRef.current.size >= 2 && pinchStateRef.current && ptr.pointerType !== 'touch' && containerRef.current) {
       const pts = Array.from(pointersRef.current.values());
+      const rect = containerRef.current.getBoundingClientRect();
       const currentDist = Math.hypot(pts[0].clientX - pts[1].clientX, pts[0].clientY - pts[1].clientY);
-      const currentMidX = (pts[0].clientX + pts[1].clientX) / 2;
-      const currentMidY = (pts[0].clientY + pts[1].clientY) / 2;
-      const { initialDist, initialScale, initialPan, initialMidpoint } = pinchStateRef.current;
+      const currentMidX = (pts[0].clientX + pts[1].clientX) / 2 - rect.left;
+      const currentMidY = (pts[0].clientY + pts[1].clientY) / 2 - rect.top;
+      const { initialDist, initialScale, focalCanvasX, focalCanvasY } = pinchStateRef.current;
 
       if (initialDist > 0) {
         if (twoFingerTapRef.current) {
-          if (Math.hypot(currentMidX - twoFingerTapRef.current.startX, currentMidY - twoFingerTapRef.current.startY) > 12 || Math.abs(currentDist - initialDist) > 15) {
+          const rawMidX = (pts[0].clientX + pts[1].clientX) / 2;
+          const rawMidY = (pts[0].clientY + pts[1].clientY) / 2;
+          if (Math.hypot(rawMidX - twoFingerTapRef.current.startX, rawMidY - twoFingerTapRef.current.startY) > 12 || Math.abs(currentDist - initialDist) > 15) {
             twoFingerTapRef.current.moved = true;
           }
         }
         const factor = currentDist / initialDist;
-        const newScale = Math.min(3.0, Math.max(0.25, Number((initialScale * factor).toFixed(3))));
-        const scaleRatio = newScale / initialScale;
-        const focalX = initialMidpoint.x;
-        const focalY = initialMidpoint.y;
-        const newPanX = focalX - (focalX - initialPan.x) * scaleRatio + (currentMidX - initialMidpoint.x);
-        const newPanY = focalY - (focalY - initialPan.y) * scaleRatio + (currentMidY - initialMidpoint.y);
+        let newScale = Math.min(3.0, Math.max(0.15, Number((initialScale * factor).toFixed(3))));
+        // Magnetic snap near 100% on pinch
+        if (Math.abs(newScale - 1.0) < 0.035) {
+          newScale = 1.0;
+        }
 
+        const focalPanX = Math.round(currentMidX - focalCanvasX * newScale);
+        const focalPanY = Math.round(currentMidY - focalCanvasY * newScale);
+        const nextPan = clampPan(focalPanX, focalPanY, newScale);
+
+        scaleRef.current = newScale;
+        panRef.current = nextPan;
+        lastInternalScaleSetRef.current = newScale;
         onSetScale(newScale);
-        setPan(clampPan(newPanX, newPanY, newScale));
+        setPan(nextPan);
+        triggerZoomOsd(newScale);
       }
       return;
     }
 
     const isMouseRelease = (!ptr.pointerType || ptr.pointerType === 'mouse') && e.buttons === 0;
     if (isMouseRelease && (selectionRef.current || dragRef.current || lineHandleDragRef.current || headerResizeRef.current || isPanning || scrollbarDragRef.current)) {
-      if (scrollbarDragRef.current) {
-        scrollbarDragRef.current = null;
-        if (scrollbarRafRef.current !== null) {
-          cancelAnimationFrame(scrollbarRafRef.current);
-          scrollbarRafRef.current = null;
-        }
-        pendingScrollbarPanRef.current = null;
-      }
-      if (selectionRef.current) {
-        selectionRef.current = null;
-        setSelectionBox(null);
-      }
-      if (dragRef.current) {
-        dragRef.current = null;
-        setActiveDragId(null);
-        setDragOverColumnId(null);
-        setDragOverTaskListId(null);
-        onDragChange?.(false);
-      }
-      if (lineHandleDragRef.current) {
-        lineHandleDragRef.current = null;
-        setActiveLineHandleDrag(null);
-        setLineDragPreview(null);
-      }
-      if (headerResizeRef.current) {
-        headerResizeRef.current = null;
-        setHeaderResize(null);
-      }
-      if (isPanning) setIsPanning(false);
+      mouseUpRef.current(e);
       return;
     }
     if (scrollbarDragRef.current) {
@@ -1548,6 +2306,17 @@ export const Canvas: React.FC<CanvasProps> = ({
         });
       }
       return;
+    }
+    if (touchHoldTimerRef.current) {
+      const dist = Math.hypot(
+        e.clientX - (touchHoldStartPosRef.current?.clientX || e.clientX),
+        e.clientY - (touchHoldStartPosRef.current?.clientY || e.clientY)
+      );
+      if (dist > 8) {
+        clearTimeout(touchHoldTimerRef.current);
+        touchHoldTimerRef.current = null;
+        setIsPanning(true);
+      }
     }
     if (isPanning) {
       const dx = e.clientX - panStartRef.current.x;
@@ -1768,19 +2537,47 @@ export const Canvas: React.FC<CanvasProps> = ({
       const minY = Math.min(updatedBox.startY, updatedBox.currentY);
       const maxY = Math.max(updatedBox.startY, updatedBox.currentY);
 
-      const hitIds: string[] = [];
+      const hitIds = new Set<string>();
       elements.forEach((el) => {
-        if (el.style?.parent_column_id) return;
-        const width = el.width || (el.element_type === 'nested_board' ? 80 : 340);
-        const height = el.height || (el.element_type === 'nested_board' ? 100 : 60);
+        if (el.style?.parent_column_id || el.style?.is_unsorted || el.element_type === 'line') return;
+        const domEl = document.getElementById(`milanote-el-${el.id}`);
+        const width = el.width || (domEl ? domEl.offsetWidth : (el.element_type === 'nested_board' ? 80 : 340));
+        const height = el.height || (domEl ? domEl.offsetHeight : (el.element_type === 'nested_board' ? 100 : 60));
         const elRight = el.x + width;
         const elBottom = el.y + height;
         
         if (elRight >= minX && el.x <= maxX && elBottom >= minY && el.y <= maxY) {
-          hitIds.push(el.id);
+          hitIds.add(el.id);
         }
       });
-      if (onMultiSelect) onMultiSelect(hitIds);
+
+      const initial = selectionInitialIdsRef.current || [];
+      const nextSelected: string[] = [];
+      // Symmetric difference (inversion / XOR):
+      // If already selected, invert to unselected when inside the box.
+      // If unselected, invert to selected when inside the box.
+      // If outside the box, maintain initial selection state.
+      initial.forEach((id) => {
+        if (!hitIds.has(id)) {
+          nextSelected.push(id);
+        }
+      });
+      hitIds.forEach((id) => {
+        if (!initial.includes(id)) {
+          nextSelected.push(id);
+        }
+      });
+
+      const prevDispatched = lastDispatchedSelectedRef.current;
+      const isSame = prevDispatched.length === nextSelected.length && prevDispatched.every((id, idx) => id === nextSelected[idx]);
+      if (!isSame) {
+        lastDispatchedSelectedRef.current = nextSelected;
+        if (onMultiSelect) {
+          onMultiSelect(nextSelected);
+        } else {
+          onSelectElement(nextSelected.length > 0 ? nextSelected[nextSelected.length - 1] : null);
+        }
+      }
       return;
     }
 
@@ -1816,18 +2613,22 @@ export const Canvas: React.FC<CanvasProps> = ({
       
       const dist = Math.hypot(e.clientX - startX, e.clientY - startY);
       const isTouch = (ptr.pointerType === 'touch') || isTouchPrimary();
-      const dragThreshold = isTouch ? (isFromColumn ? 20 : 14) : (isFromColumn ? 16 : 6);
+      const dragThreshold = isTouch ? (isFromColumn ? 20 : 14) : (isFromColumn ? 16 : 4);
       if (!dragRef.current.hasExceededThreshold && dist < dragThreshold && !isResize) {
         return;
       }
+
+      const currentScale = scaleRef.current || scale || 1;
+      const dx = (e.clientX - startX) / currentScale;
+      const dy = (e.clientY - startY) / currentScale;
+
       if (!dragRef.current.hasExceededThreshold) {
         dragRef.current.hasExceededThreshold = true;
+        dragRef.current.currentDx = dx;
+        dragRef.current.currentDy = dy;
         onDragChange?.(true);
       }
       if (activeDragId !== elementId) setActiveDragId(elementId);
-
-      const dx = (e.clientX - startX) / scale;
-      const dy = (e.clientY - startY) / scale;
 
       if (isResize && dragGroup.length > 0) {
         const item = dragGroup[0];
@@ -1924,25 +2725,54 @@ export const Canvas: React.FC<CanvasProps> = ({
         let newWidth = Math.max(item.origWidth + dx, 110);
         let newHeight = Math.max(item.origHeight + dy, 50);
 
-        if (item.isColumn || resizeDirection === 'e') {
+        if (resizeDirection === 's') {
+          newWidth = item.origWidth;
+        }
+
+        if (item.isColumn || resizeDirection === 'e' || item.elementType === 'task_list') {
           newHeight = item.origHeight;
         } else if (item.elementType === 'link') {
-          if (!item.isVideoLink) {
-            newHeight = item.origHeight;
+          if (item.isVideoLink) {
+            // video
+          } else {
+            const bannerAspect = item.linkBannerAspect || (16 / 9);
+            if (resizeDirection === 'se' && Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > 10) {
+              const targetBannerH = Math.max(item.origHeight - (item.linkBodyHeight || 80) + dy, 40);
+              newWidth = Math.max(Math.round(targetBannerH * bannerAspect), 140);
+            }
+            const bannerH = Math.round(newWidth / bannerAspect);
+            newHeight = bannerH + (item.linkBodyHeight || 80);
           }
         } else if (item.elementType === 'image') {
-          const aspectRatio = (item.origWidth && item.origHeight && item.origHeight > 0) ? (item.origWidth / item.origHeight) : (340 / 220);
+          const aspectRatio = (item as any).imageAspect || ((item.origWidth && item.origHeight && item.origHeight > 0) ? (item.origWidth / item.origHeight) : (340 / 220));
           newHeight = Math.max(Math.round(newWidth / aspectRatio), 40);
         }
 
+        item.currentX = item.origX;
+        item.currentY = item.origY;
+        dragRef.current.liveWidth = newWidth;
+        dragRef.current.liveHeight = newHeight;
+        dragRef.current.targetDx = 0;
+        dragRef.current.targetDy = 0;
+
         const elDiv = document.getElementById(`milanote-el-${elementId}`);
         const currentEl = elements.find((x) => x.id === elementId);
-        const isAutoHeightEl = item.isColumn || (item.elementType === 'link' && !item.isVideoLink) || (item.elementType === 'image' && Boolean(currentEl?.content?.show_caption));
+        const isAutoHeightEl = item.isColumn || item.elementType === 'task_list' || (item.elementType === 'image' && Boolean(currentEl?.content?.show_caption));
         if (elDiv) {
+          elDiv.style.transform = `translate3d(${item.origX}px, ${item.origY}px, 0)`;
           elDiv.style.width = `${newWidth}px`;
           if (item.elementType === 'image') {
             const photoWrap = elDiv.querySelector('.image-photo-wrap') as HTMLElement | null;
             if (photoWrap) photoWrap.style.height = `${newHeight}px`;
+          } else if (item.elementType === 'link') {
+            const bannerWrap = elDiv.querySelector('.rich-link-banner-wrap') as HTMLElement | null;
+            if (bannerWrap) {
+              const bannerAspect = item.linkBannerAspect || (16 / 9);
+              const bannerH = Math.round(newWidth / bannerAspect);
+              bannerWrap.style.height = `${bannerH}px`;
+              bannerWrap.style.minHeight = '0px';
+              bannerWrap.style.maxHeight = 'none';
+            }
           }
           if (!isAutoHeightEl) {
             elDiv.style.height = `${newHeight}px`;
@@ -1952,11 +2782,28 @@ export const Canvas: React.FC<CanvasProps> = ({
             elDiv.style.minHeight = '0px';
           }
         }
+        setDragTick((t) => (t + 1) % 1000000);
       } else {
+        const now = performance.now();
+        if (dragRef.current.lastMoveTime) {
+          const dt = Math.max(1, now - dragRef.current.lastMoveTime);
+          const deltaX = e.clientX - (dragRef.current.lastClientX ?? e.clientX);
+          const rawVx = (deltaX / dt) * 16.67;
+          dragRef.current.smoothVx = (dragRef.current.smoothVx || 0) * 0.75 + rawVx * 0.25;
+        }
+        dragRef.current.lastMoveTime = now;
+        dragRef.current.lastClientX = e.clientX;
+
         dragRef.current.targetDx = dx;
         dragRef.current.targetDy = dy;
+        dragRef.current.currentDx = dx;
+        dragRef.current.currentDy = dy;
         dragRef.current.clientX = e.clientX;
         dragRef.current.clientY = e.clientY;
+        dragRef.current.dragGroup.forEach((item) => {
+          item.currentX = Number((item.origX + dx).toFixed(1));
+          item.currentY = Number((item.origY + dy).toFixed(1));
+        });
         startDragRafLoop();
       }
     }
@@ -1965,6 +2812,15 @@ export const Canvas: React.FC<CanvasProps> = ({
   const handleMouseUp = useCallback((e: MouseEvent | PointerEvent) => {
     const ptr = e as PointerEvent;
 
+    if (touchHoldTimerRef.current) {
+      clearTimeout(touchHoldTimerRef.current);
+      touchHoldTimerRef.current = null;
+    }
+    if (ptr.pointerType === 'touch') {
+      lastTouchTapRef.current = { time: Date.now(), x: (e as any).clientX || 0, y: (e as any).clientY || 0 };
+    }
+    isTouchSelectingRef.current = false;
+
     if (ptr.pointerType === 'touch' && twoFingerTapRef.current) {
       const duration = Date.now() - twoFingerTapRef.current.startTime;
       if (!twoFingerTapRef.current.moved && duration < 450) {
@@ -1972,7 +2828,16 @@ export const Canvas: React.FC<CanvasProps> = ({
         if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
           try { navigator.vibrate(30); } catch (_) {}
         }
-        onTwoFingerTap?.(Math.round(cPos.x), Math.round(cPos.y));
+        const sX = twoFingerTapRef.current.startX;
+        const sY = twoFingerTapRef.current.startY;
+        const targetNode = document.elementFromPoint(sX, sY);
+        const cardWrapper = targetNode?.closest('[id^="milanote-el-"]');
+        let tappedEl: Element | null = null;
+        if (cardWrapper) {
+          const elId = cardWrapper.id.replace('milanote-el-', '');
+          tappedEl = elements.find(el => el.id === elId) || null;
+        }
+        onTwoFingerTap?.(Math.round(cPos.x), Math.round(cPos.y), Math.round(sX), Math.round(sY), tappedEl);
       }
       twoFingerTapRef.current = null;
     }
@@ -1981,7 +2846,10 @@ export const Canvas: React.FC<CanvasProps> = ({
       pointersRef.current.delete(ptr.pointerId);
     }
     if (pointersRef.current.size < 2) {
-      pinchStateRef.current = null;
+      if (pinchStateRef.current) {
+        lastPinchEndTimeRef.current = Date.now();
+        pinchStateRef.current = null;
+      }
     }
 
     if (hoverEnterBoardRef.current?.timer) {
@@ -2058,8 +2926,9 @@ export const Canvas: React.FC<CanvasProps> = ({
         return;
       }
 
-      const dx = dragRef.current.targetDx !== undefined ? dragRef.current.targetDx : (e.clientX - startX) / scale;
-      const dy = dragRef.current.targetDy !== undefined ? dragRef.current.targetDy : (e.clientY - startY) / scale;
+      const currentScale = scaleRef.current || scale || 1;
+      const dx = (isResize || dragRef.current.targetDx === undefined) ? (e.clientX - startX) / currentScale : dragRef.current.targetDx;
+      const dy = (isResize || dragRef.current.targetDy === undefined) ? (e.clientY - startY) / currentScale : dragRef.current.targetDy;
 
       // RESOLVED TELEPORT BUG: Only scrub transforms and fixed coordinates when dragging items OUT of columns!
       // Erasing transform on standard canvas cards destroys their translate3d coordinates and causes jumping/teleporting.
@@ -2079,10 +2948,24 @@ export const Canvas: React.FC<CanvasProps> = ({
       }
 
       const unsortedDrawerEl = document.querySelector('.unsorted-drawer');
+      const unsortedPillEl = document.querySelector('.mobile-unsorted-floating-pill');
+      const quickNotesBtn = document.querySelector('.mobile-tab-btn[title="Quick notes"]') || document.querySelector('.mobile-tab-btn:nth-child(2)');
       let overUnsortedDrawer = false;
       if (unsortedDrawerEl) {
         const dRect = unsortedDrawerEl.getBoundingClientRect();
         if (e.clientX >= dRect.left && e.clientX <= dRect.right && e.clientY >= dRect.top && e.clientY <= dRect.bottom) {
+          overUnsortedDrawer = true;
+        }
+      }
+      if (unsortedPillEl) {
+        const pRect = unsortedPillEl.getBoundingClientRect();
+        if (e.clientX >= pRect.left && e.clientX <= pRect.right && e.clientY >= pRect.top && e.clientY <= pRect.bottom) {
+          overUnsortedDrawer = true;
+        }
+      }
+      if (quickNotesBtn) {
+        const qRect = quickNotesBtn.getBoundingClientRect();
+        if (e.clientX >= qRect.left && e.clientX <= qRect.right && e.clientY >= qRect.top && e.clientY <= qRect.bottom) {
           overUnsortedDrawer = true;
         }
       }
@@ -2215,22 +3098,42 @@ export const Canvas: React.FC<CanvasProps> = ({
           onDragChange?.(false);
           return;
         }
-        let newWidth = Math.max(Math.round(item.origWidth + dx), 110);
-        let newHeight = Math.max(Math.round(item.origHeight + dy), 50);
+        let newWidth = dragRef.current.liveWidth !== undefined
+          ? dragRef.current.liveWidth
+          : Math.max(Math.round(item.origWidth + dx), 110);
+        let newHeight = dragRef.current.liveHeight !== undefined
+          ? dragRef.current.liveHeight
+          : Math.max(Math.round(item.origHeight + dy), 50);
 
-        if (item.isColumn || resizeDirection === 'e') {
+        if (resizeDirection === 's') {
+          newWidth = item.origWidth;
+        }
+
+        if (item.isColumn || resizeDirection === 'e' || item.elementType === 'task_list') {
           newHeight = item.origHeight;
         } else if (item.elementType === 'link') {
-          if (!item.isVideoLink) {
+          if (item.isVideoLink) {
             const finalDom = document.getElementById(`milanote-el-${item.id}`);
             newHeight = finalDom ? finalDom.offsetHeight : item.origHeight;
+          } else {
+            const bannerAspect = item.linkBannerAspect || (16 / 9);
+            const bannerH = Math.round(newWidth / bannerAspect);
+            newHeight = bannerH + (item.linkBodyHeight || 80);
           }
         } else if (item.elementType === 'image') {
-          const aspect = (item.origWidth && item.origHeight && item.origHeight > 0) ? (item.origWidth / item.origHeight) : (340 / 220);
+          const aspect = (item as any).imageAspect || ((item.origWidth && item.origHeight && item.origHeight > 0) ? (item.origWidth / item.origHeight) : (340 / 220));
           newHeight = Math.max(Math.round(newWidth / aspect), 40);
         }
 
         const updates: ElementPositionUpdate[] = [{ id: item.id, x: item.origX, y: item.origY, width: newWidth, height: newHeight, z_index: item.zIndex }];
+
+        if (item.elementType === 'note') {
+          const noteEl = elements.find(x => x.id === item.id);
+          onStyleChange(item.id, { ...(noteEl?.style || {}), is_custom_height: true });
+        } else if (item.elementType === 'link') {
+          const linkEl = elements.find(x => x.id === item.id);
+          onStyleChange(item.id, { ...(linkEl?.style || {}), is_custom_size: true });
+        }
 
         if (item.isColumn) {
           const childElements = elements.filter(c => c.style?.parent_column_id === item.id);
@@ -2247,6 +3150,17 @@ export const Canvas: React.FC<CanvasProps> = ({
         }
 
         onUpdateElementPositions(updates);
+        const elDiv = document.getElementById(`milanote-el-${item.id}`);
+        const currentEl = elements.find((x) => x.id === item.id);
+        const isAutoHeightEl = item.isColumn || item.elementType === 'task_list' || (item.elementType === 'image' && Boolean(currentEl?.content?.show_caption));
+        if (elDiv) {
+          elDiv.style.transform = `translate3d(${item.origX}px, ${item.origY}px, 0)`;
+          elDiv.style.width = `${newWidth}px`;
+          if (!isAutoHeightEl) {
+            elDiv.style.height = `${newHeight}px`;
+            elDiv.style.minHeight = `${newHeight}px`;
+          }
+        }
       } else if (isFromColumn && dragGroup.length > 0 && dragOverColumnId !== origColumnId) {
         const item = dragGroup[0];
         const el = elements.find((x) => x.id === item.id);
@@ -2264,6 +3178,7 @@ export const Canvas: React.FC<CanvasProps> = ({
           onUpdateElementPositions([{ id: item.id, x: dropX, y: dropY, width: targetWidth, height: targetHeight, z_index: item.zIndex + 10 }]);
         }
       } else {
+        const isDesktop = !isTouchPrimary() && !isPhoneScreen();
         const updates: ElementPositionUpdate[] = dragGroup.map((item) => ({
           id: item.id,
           x: Math.round(item.origX + dx),
@@ -2273,6 +3188,14 @@ export const Canvas: React.FC<CanvasProps> = ({
           z_index: item.zIndex + 1,
         }));
         onUpdateElementPositions(updates);
+
+        dragGroup.forEach((item) => {
+          const elDiv = document.getElementById(`milanote-el-${item.id}`);
+          if (elDiv) {
+            elDiv.classList.remove('drag-settle-animation');
+            elDiv.style.transform = `translate3d(${Math.round(item.origX + dx)}px, ${Math.round(item.origY + dy)}px, 0)`;
+          }
+        });
       }
 
       setDragOverColumnId(null);
@@ -2280,19 +3203,46 @@ export const Canvas: React.FC<CanvasProps> = ({
       setActiveDragId(null);
       onSetHoveringTrash(false);
       onDragChange?.(false);
+      setDragTick((t) => (t + 1) % 1000000);
     }
   }, [isPanning, scale, elements, onUpdateElementPositions, onDeleteElement, onSetHoveringTrash, screenToCanvas, onStyleChange, dragOverColumnId, headerResize, onMoveElementToBoard, hoveredBoardId, onOpenBoard, isHoveringUnsorted, onMoveToUnsorted, onDragChange]);
 
   useEffect(() => {
-    window.addEventListener('mousemove', handleMouseMove as any);
-    window.addEventListener('mouseup', handleMouseUp as any);
+    mouseUpRef.current = handleMouseUp;
+  }, [handleMouseUp]);
+
+  useEffect(() => {
+    const handleWindowPointerDownCapture = (e: PointerEvent) => {
+      if (e.pointerType === 'touch') {
+        pointersRef.current.set(e.pointerId, {
+          clientX: e.clientX,
+          clientY: e.clientY,
+          pointerType: e.pointerType,
+        });
+        if (pointersRef.current.size >= 2) {
+          if (dragRef.current) {
+            dragRef.current = null;
+            setActiveDragId(null);
+            setDragOverColumnId(null);
+            setDragOverTaskListId(null);
+            onDragChange?.(false);
+          }
+          if (selectionRef.current) {
+            selectionRef.current = null;
+            setSelectionBox(null);
+          }
+          setIsPanning(false);
+        }
+      }
+    };
+
+    window.addEventListener('pointerdown', handleWindowPointerDownCapture as any, { capture: true });
     window.addEventListener('pointermove', handleMouseMove as any);
     window.addEventListener('pointerup', handleMouseUp as any);
     window.addEventListener('pointercancel', handleMouseUp as any);
     window.addEventListener('blur', handleMouseUp as any);
     return () => {
-      window.removeEventListener('mousemove', handleMouseMove as any);
-      window.removeEventListener('mouseup', handleMouseUp as any);
+      window.removeEventListener('pointerdown', handleWindowPointerDownCapture as any, { capture: true } as any);
       window.removeEventListener('pointermove', handleMouseMove as any);
       window.removeEventListener('pointerup', handleMouseUp as any);
       window.removeEventListener('pointercancel', handleMouseUp as any);
@@ -2306,7 +3256,166 @@ export const Canvas: React.FC<CanvasProps> = ({
         scrollbarRafRef.current = null;
       }
     };
-  }, [handleMouseMove, handleMouseUp, setLineDragPreview, onContentChange]);
+  }, [handleMouseMove, handleMouseUp, onDragChange]);
+
+  // Native non-passive touch listeners for silky-smooth multi-touch pinch zoom & pan on mobile/tablets
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length >= 2 && containerRef.current) {
+        e.preventDefault();
+
+        // Cancel any active drag or selection
+        if (dragRef.current) {
+          dragRef.current = null;
+          setActiveDragId(null);
+          setDragOverColumnId(null);
+          setDragOverTaskListId(null);
+          onDragChange?.(false);
+        }
+        if (selectionRef.current) {
+          selectionRef.current = null;
+          setSelectionBox(null);
+        }
+        if (lineHandleDragRef.current) {
+          lineHandleDragRef.current = null;
+          setActiveLineHandleDrag(null);
+          setLineDragPreview(null);
+        }
+        if (headerResizeRef.current) {
+          headerResizeRef.current = null;
+          setHeaderResize(null);
+        }
+        if (zoomRafRef.current) {
+          cancelAnimationFrame(zoomRafRef.current);
+          zoomRafRef.current = null;
+          targetScaleRef.current = null;
+          isZoomingRef.current = false;
+        }
+        setIsPanning(false);
+
+        const t0 = e.touches[0];
+        const t1 = e.touches[1];
+        const rect = containerRef.current.getBoundingClientRect();
+        const dist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
+        const midX = (t0.clientX + t1.clientX) / 2 - rect.left;
+        const midY = (t0.clientY + t1.clientY) / 2 - rect.top;
+
+        const currentScale = scaleRef.current;
+        const currentPan = panRef.current;
+        const focalCanvasX = (midX - currentPan.x) / currentScale;
+        const focalCanvasY = (midY - currentPan.y) / currentScale;
+
+        pinchStateRef.current = {
+          initialDist: dist,
+          initialScale: currentScale,
+          focalCanvasX,
+          focalCanvasY,
+        };
+
+        twoFingerTapRef.current = {
+          startTime: Date.now(),
+          startX: (t0.clientX + t1.clientX) / 2,
+          startY: (t0.clientY + t1.clientY) / 2,
+          moved: false,
+        };
+      }
+    };
+
+    const onTouchMove = (e: TouchEvent) => {
+      if (dragRef.current || selectionRef.current || isPanning || isTouchSelectingRef.current || lineHandleDragRef.current || scrollbarDragRef.current) {
+        if (e.cancelable) e.preventDefault();
+      }
+      if (e.touches.length >= 2 && pinchStateRef.current && containerRef.current) {
+        if (e.cancelable) e.preventDefault();
+
+        const t0 = e.touches[0];
+        const t1 = e.touches[1];
+        const rect = containerRef.current.getBoundingClientRect();
+        const currentDist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
+        const currentMidX = (t0.clientX + t1.clientX) / 2 - rect.left;
+        const currentMidY = (t0.clientY + t1.clientY) / 2 - rect.top;
+        const { initialDist, initialScale, focalCanvasX, focalCanvasY } = pinchStateRef.current;
+
+        if (initialDist > 0) {
+          if (twoFingerTapRef.current) {
+            const rawMidX = (t0.clientX + t1.clientX) / 2;
+            const rawMidY = (t0.clientY + t1.clientY) / 2;
+            if (
+              Math.hypot(rawMidX - twoFingerTapRef.current.startX, rawMidY - twoFingerTapRef.current.startY) > 12 ||
+              Math.abs(currentDist - initialDist) > 15
+            ) {
+              twoFingerTapRef.current.moved = true;
+            }
+          }
+
+          const factor = currentDist / initialDist;
+          let newScale = Math.min(3.0, Math.max(0.15, Number((initialScale * factor).toFixed(3))));
+          // Magnetic snap near 100% on pinch
+          if (Math.abs(newScale - 1.0) < 0.035) {
+            newScale = 1.0;
+          }
+
+          // Exact focal pan: the canvas point (focalCanvasX, focalCanvasY) remains locked
+          // right under (currentMidX, currentMidY) throughout pinch in and pinch out!
+          const focalPanX = Math.round(currentMidX - focalCanvasX * newScale);
+          const focalPanY = Math.round(currentMidY - focalCanvasY * newScale);
+          const nextPan = clampPan(focalPanX, focalPanY, newScale);
+
+          scaleRef.current = newScale;
+          panRef.current = nextPan;
+          lastInternalScaleSetRef.current = newScale;
+          onSetScale(newScale);
+          setPan(nextPan);
+          triggerZoomOsd(newScale);
+        }
+      }
+    };
+
+    const onTouchEnd = (e: TouchEvent) => {
+      if (twoFingerTapRef.current) {
+        const duration = Date.now() - twoFingerTapRef.current.startTime;
+        if (!twoFingerTapRef.current.moved && duration < 450) {
+          const cPos = screenToCanvas(twoFingerTapRef.current.startX, twoFingerTapRef.current.startY);
+          if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+            try { navigator.vibrate(30); } catch (_) {}
+          }
+          const sX = twoFingerTapRef.current.startX;
+          const sY = twoFingerTapRef.current.startY;
+          const targetNode = document.elementFromPoint(sX, sY);
+          const cardWrapper = targetNode?.closest('[id^="milanote-el-"]');
+          let tappedEl: Element | null = null;
+          if (cardWrapper) {
+            const elId = cardWrapper.id.replace('milanote-el-', '');
+            tappedEl = elements.find(el => el.id === elId) || null;
+          }
+          onTwoFingerTap?.(Math.round(cPos.x), Math.round(cPos.y), Math.round(sX), Math.round(sY), tappedEl);
+        }
+        twoFingerTapRef.current = null;
+      }
+
+      if (e.touches.length < 2) {
+        if (pinchStateRef.current) {
+          lastPinchEndTimeRef.current = Date.now();
+          pinchStateRef.current = null;
+        }
+      }
+    };
+
+    container.addEventListener('touchstart', onTouchStart, { passive: false });
+    container.addEventListener('touchmove', onTouchMove, { passive: false });
+    container.addEventListener('touchend', onTouchEnd, { passive: false });
+    container.addEventListener('touchcancel', onTouchEnd, { passive: false });
+
+    return () => {
+      container.removeEventListener('touchstart', onTouchStart);
+      container.removeEventListener('touchmove', onTouchMove);
+      container.removeEventListener('touchend', onTouchEnd);
+      container.removeEventListener('touchcancel', onTouchEnd);
+    };
+  }, [clampPan, onSetScale, onDragChange, screenToCanvas, onTwoFingerTap]);
 
   // Task 2.9: Soft Keyboard / VisualViewport handling for mobile text editing
   useEffect(() => {
@@ -2366,10 +3475,47 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
   };
 
-  const handleElementMouseDown = (e: React.MouseEvent | React.PointerEvent, element: Element, isResize = false, resizeDirection?: 'se' | 'e', isFromColumn = false) => {
+  const handleElementMouseDown = (e: React.MouseEvent | React.PointerEvent, element: Element, isResize = false, resizeDirection?: 'se' | 'e' | 's', isFromColumn = false) => {
     e.stopPropagation();
+
+    const isTouch = (e as any).pointerType === 'touch' || ('touches' in e && (e as any).touches?.length > 0) || isTouchPrimary();
+    if (isTouch) {
+      if (
+        Date.now() - lastPinchEndTimeRef.current < 300 ||
+        pinchStateRef.current ||
+        pointersRef.current.size >= 2
+      ) {
+        return;
+      }
+    }
+
     if (element.element_type === 'task_list' && isResize) return;
     if (element.style?.is_locked && !isResize) return;
+
+    // Deduplicate pointerdown and mousedown
+    const now = Date.now();
+    if (e.type === 'mousedown' && lastElementPointerDownTimeRef.current.id === element.id && now - lastElementPointerDownTimeRef.current.time < 300) {
+      return;
+    }
+    if (e.type === 'pointerdown') {
+      lastElementPointerDownTimeRef.current = { id: element.id, time: now };
+    }
+
+    // Spacebar + Left click for panning (works over cards, notes, columns, lines)
+    if (isSpacePressedRef.current && e.button === 0) {
+      e.preventDefault();
+      setIsPanning(true);
+      panStartRef.current = { x: e.clientX, y: e.clientY, startPanX: pan.x, startPanY: pan.y };
+      return;
+    }
+
+    // Middle-click also pans from anywhere
+    if (e.button === 1 || e.buttons === 4) {
+      e.preventDefault();
+      setIsPanning(true);
+      panStartRef.current = { x: e.clientX, y: e.clientY, startPanX: pan.x, startPanY: pan.y };
+      return;
+    }
 
     // Tap-to-place onto column or board container (Task 2.8)
     if (activeTool && activeTool !== 'select') {
@@ -2404,8 +3550,32 @@ export const Canvas: React.FC<CanvasProps> = ({
       } else {
         nextSelected = [...currentSelected, element.id];
       }
-      if (onMultiSelect) onMultiSelect(nextSelected);
-      onSelectElement(nextSelected[nextSelected.length - 1] || null);
+      if (onMultiSelect) {
+        onMultiSelect(nextSelected);
+      } else {
+        onSelectElement(nextSelected[nextSelected.length - 1] || null);
+      }
+      if (editingElementId) onSetEditingElement(null);
+      return;
+    }
+
+    // RESOLVED REQUIREMENT: Ctrl+Click (and Cmd+Click) multi-selection toggle & inverse logic!
+    if ((e.ctrlKey || e.metaKey) && !isResize) {
+      e.preventDefault();
+      e.stopPropagation();
+      const currentSelected = selectedIds.length > 0 ? [...selectedIds] : (selectedElementId ? [selectedElementId] : []);
+      const index = currentSelected.indexOf(element.id);
+      let nextSelected: string[];
+      if (index >= 0) {
+        nextSelected = currentSelected.filter((id) => id !== element.id);
+      } else {
+        nextSelected = [...currentSelected, element.id];
+      }
+      if (onMultiSelect) {
+        onMultiSelect(nextSelected);
+      } else {
+        onSelectElement(nextSelected.length > 0 ? nextSelected[nextSelected.length - 1] : null);
+      }
       if (editingElementId) onSetEditingElement(null);
       return;
     }
@@ -2417,36 +3587,30 @@ export const Canvas: React.FC<CanvasProps> = ({
       return;
     }
 
-    // RESOLVED REQUIREMENT: Ctrl+Click (and Cmd+Click) multi-selection toggle logic!
-    if ((e.ctrlKey || e.metaKey) && !isResize) {
-      e.preventDefault();
-      const currentSelected = selectedIds.length > 0 ? [...selectedIds] : (selectedElementId ? [selectedElementId] : []);
-      const index = currentSelected.indexOf(element.id);
-      let nextSelected: string[];
-      if (index >= 0) {
-        nextSelected = currentSelected.filter((id) => id !== element.id);
-      } else {
-        nextSelected = [...currentSelected, element.id];
-      }
-      if (onMultiSelect) onMultiSelect(nextSelected);
-      onSelectElement(nextSelected[nextSelected.length - 1] || null);
-      if (editingElementId) onSetEditingElement(null);
-      return;
-    }
-
     const rect = e.currentTarget.getBoundingClientRect();
     const offsetX = e.clientX - rect.left;
     const offsetY = e.clientY - rect.top;
 
     dragOccurredRef.current = false;
+
+    if (!isResize) {
+      if (!selectedIds.includes(element.id) || selectedIds.length <= 1) {
+        onSelectElement(element.id);
+        if (onMultiSelect) onMultiSelect([element.id]);
+      }
+      if (editingElementId && editingElementId !== element.id) {
+        onSetEditingElement(null);
+      }
+    } else {
+      if (selectedElementId !== element.id) {
+        onSelectElement(element.id);
+        if (onMultiSelect) onMultiSelect([element.id]);
+      }
+    }
+
     let groupToDrag = [element.id];
     if (selectedIds.includes(element.id) && selectedIds.length > 1 && !isResize) {
       groupToDrag = [...selectedIds];
-    } else if (!selectedIds.includes(element.id) && selectedElementId !== element.id) {
-      if (selectedElementId || selectedIds.length > 0) {
-        onSelectElement(null);
-        if (onMultiSelect) onMultiSelect([]);
-      }
     }
 
     if (!isResize) {
@@ -2463,23 +3627,62 @@ export const Canvas: React.FC<CanvasProps> = ({
       const isBoard = found.element_type === 'nested_board';
       const domEl = document.getElementById(`milanote-el-${found.id}`);
       const isRichLink = found.element_type === 'link' && Boolean(found.content?.url && found.content.url.trim().length > 0);
-      const measuredHeight = domEl ? domEl.offsetHeight : (isBoard ? 100 : 60);
+      const isNote = found.element_type === 'note';
+      const measuredWidth = found.width || (domEl ? domEl.offsetWidth : (isBoard ? 80 : 340));
+      const measuredHeight = (isNote && !found.style?.is_custom_height && domEl)
+        ? domEl.offsetHeight
+        : (found.height || (domEl ? domEl.offsetHeight : (isBoard ? 100 : 60)));
+
+      const imgTag = domEl?.querySelector('img') as HTMLImageElement | null;
+      let imageAspect: number | undefined = undefined;
+      if (found.element_type === 'image') {
+        if (found.width && found.height && found.height > 0) {
+          imageAspect = found.width / found.height;
+        } else if (imgTag && imgTag.naturalWidth && imgTag.naturalHeight) {
+          imageAspect = imgTag.naturalWidth / imgTag.naturalHeight;
+        } else if (measuredWidth && measuredHeight && measuredHeight > 0) {
+          imageAspect = measuredWidth / measuredHeight;
+        } else {
+          imageAspect = 340 / 220;
+        }
+      }
+
+      let linkBannerAspect: number | undefined = undefined;
+      let linkBodyHeight = 0;
+      if (found.element_type === 'link') {
+        const linkImg = domEl?.querySelector('.rich-link-banner-wrap img') as HTMLImageElement | null;
+        if (linkImg && linkImg.naturalWidth && linkImg.naturalHeight) {
+          linkBannerAspect = linkImg.naturalWidth / linkImg.naturalHeight;
+        } else if (linkImg && linkImg.offsetWidth && linkImg.offsetHeight) {
+          linkBannerAspect = linkImg.offsetWidth / linkImg.offsetHeight;
+        } else {
+          linkBannerAspect = 16 / 9;
+        }
+        const bodyEl = domEl?.querySelector('.rich-link-body') as HTMLElement | null;
+        const captionEl = domEl?.querySelector('.link-caption-wrapper') as HTMLElement | null;
+        linkBodyHeight = (bodyEl ? bodyEl.offsetHeight : 80) + (captionEl ? captionEl.offsetHeight : 0);
+      }
+
       return {
         id: found.id,
         origX: found.x,
         origY: found.y,
-        origWidth: found.width || (isBoard ? 80 : 340),
-        origHeight: isRichLink ? measuredHeight : (found.height || (isBoard ? 100 : 60)),
+        origWidth: isResize ? measuredWidth : (found.width || (isBoard ? 80 : 340)),
+        origHeight: isResize ? measuredHeight : (isRichLink ? measuredHeight : (found.height || (isBoard ? 100 : 60))),
         zIndex: found.z_index || 10,
         isColumn: found.element_type === 'column',
         isFromColumn: Boolean(found.style?.parent_column_id),
         elementType: found.element_type,
         origCols: found.content?.columns || 4,
         origRows: found.content?.rows || 4,
-        isVideoLink: Boolean(found.element_type === 'link' && found.content?.url && (found.content.url.match(/youtube\.com|youtu\.be|vimeo|mp4|twitch/i)))
+        isVideoLink: Boolean(found.element_type === 'link' && found.content?.url && (found.content.url.match(/youtube\.com|youtu\.be|vimeo|mp4|twitch/i))),
+        imageAspect,
+        linkBannerAspect,
+        linkBodyHeight,
       };
     });
 
+    const firstResizeItem = dragGroup[0];
     dragRef.current = {
       elementId: element.id,
       startX: e.clientX,
@@ -2495,8 +3698,14 @@ export const Canvas: React.FC<CanvasProps> = ({
       targetDy: 0,
       currentDx: 0,
       currentDy: 0,
+      currentTilt: 0,
+      smoothVx: 0,
+      lastMoveTime: performance.now(),
+      lastClientX: e.clientX,
       clientX: e.clientX,
       clientY: e.clientY,
+      liveWidth: isResize && firstResizeItem ? firstResizeItem.origWidth : undefined,
+      liveHeight: isResize && firstResizeItem ? firstResizeItem.origHeight : undefined,
       dragGroup,
     };
 
@@ -2599,12 +3808,18 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
 
     const updatedSourceItems = (sourceEl.content.items || []).filter((i: any) => i.id !== item.id);
-    onContentChange(sourceElId, { ...sourceEl.content, items: updatedSourceItems });
+    if (updatedSourceItems.length === 0 && onDeleteElement) {
+      onDeleteElement(sourceElId);
+    } else {
+      onContentChange(sourceElId, { ...sourceEl.content, items: updatedSourceItems });
+    }
 
     if (targetTaskList) {
       const targetItems = (targetTaskList.content?.items || []) as any[];
       onContentChange(targetTaskList.id, { ...targetTaskList.content, items: [...targetItems, item] });
     } else {
+      onSelectElement(null);
+      if (onMultiSelect) onMultiSelect([]);
       const canvasPos = screenToCanvas(clientX, clientY);
       let foundColId: string | undefined = undefined;
       for (let j = 0; j < columns.length; j++) {
@@ -2620,7 +3835,7 @@ export const Canvas: React.FC<CanvasProps> = ({
       }
       onCreateTaskListFromItem(Math.round(canvasPos.x - 170), Math.round(canvasPos.y - 20), item, foundColId);
     }
-  }, [elements, onContentChange, screenToCanvas, columns, onCreateTaskListFromItem]);
+  }, [elements, onContentChange, screenToCanvas, columns, onCreateTaskListFromItem, onSelectElement, onMultiSelect, onDeleteElement]);
 
   const renderCardContent = (el: Element, inColumn: boolean = false, customMouseDown?: (e: React.MouseEvent, el: Element) => void) => {
     const isEditing = editingElementId === el.id;
@@ -2635,7 +3850,7 @@ export const Canvas: React.FC<CanvasProps> = ({
           <div
             id={`milanote-el-${el.id}`}
             className={`column-board-row column-inner-card ${selectedElementId === el.id ? 'selected' : ''} ${activeDragId === el.id ? 'dragging' : ''} ${(hoveredBoardId === el.id || (el.content?.target_board_id && hoveredBoardId === el.content.target_board_id)) ? 'hover-enter-target' : ''}`}
-            style={activeDragId === el.id && dragRef.current?.hasExceededThreshold ? { zIndex: 999999 } : undefined}
+            style={activeDragId === el.id && dragRef.current?.hasExceededThreshold && !dragRef.current?.isResize ? { zIndex: 999999 } : undefined}
             onMouseDown={(e) => {
               if (customMouseDown) {
                 customMouseDown(e, el);
@@ -2647,7 +3862,7 @@ export const Canvas: React.FC<CanvasProps> = ({
             onContextMenu={(e) => {
               e.preventDefault();
               e.stopPropagation();
-              if (isTouchPrimary() || isPhoneScreen()) return;
+              if (isTouchHoldContextMenu(e)) return;
               onContextMenu(e, el);
             }}
           >
@@ -2680,6 +3895,11 @@ export const Canvas: React.FC<CanvasProps> = ({
                 className="card-quick-connect-handle"
                 title="Drag to connect"
                 onMouseDown={(e) => handleQuickConnectStart(e, el)}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  handleQuickConnectStart(e, el);
+                }}
+                onTouchStart={(e) => e.stopPropagation()}
               />
             )}
             <div className="column-board-info">
@@ -2770,28 +3990,104 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
 
     if (el.element_type === 'image') {
+      const isSelected = selectedElementId === el.id || selectedIds.includes(el.id);
+      const hasImage = Boolean(el.content?.url && el.content.url.trim().length > 0 && !el.content.url.includes('unsplash.com/photo-1618005182384-a83a8bd57fbe'));
+
       return (
-        <div className="column-image-card" style={{ background: Boolean(el.content?.show_caption) ? 'rgb(51, 51, 51)' : 'transparent', borderRadius: 0, overflow: 'hidden' }} onDoubleClick={(e) => { e.stopPropagation(); onSetEditingElement(el.id); }}>
-          <div className="image-photo-wrap" style={(!inColumn && Boolean(el.content?.show_caption) && el.height) ? { height: `${el.height}px`, borderRadius: 0 } : { borderRadius: 0 }}>
-            <img
-              src={el.content.url || 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=800&q=80'}
-              alt="Art"
-              style={{ borderRadius: 0 }}
-              onLoad={(e) => {
-                const img = e.currentTarget;
-                if (!inColumn && img.naturalWidth && img.naturalHeight) {
-                  const naturalAspect = img.naturalWidth / img.naturalHeight;
-                  const currentWidth = el.width || 340;
-                  const currentHeight = el.height || 220;
-                  const currentAspect = currentWidth / currentHeight;
-                  if (Math.abs(naturalAspect - currentAspect) > 0.02) {
-                    const optimalHeight = Math.max(40, Math.round(currentWidth / naturalAspect));
-                    onUpdateElementPositions([{ id: el.id, x: el.x, y: el.y, width: currentWidth, height: optimalHeight, z_index: el.z_index || 10 }]);
-                  }
-                }
+        <div
+          className="column-image-card"
+          style={{ background: Boolean(el.content?.show_caption) ? 'rgb(51, 51, 51)' : 'transparent', borderRadius: 0, overflow: 'hidden', position: 'relative' }}
+          onDoubleClick={(e) => { e.stopPropagation(); onSetEditingElement(el.id); }}
+        >
+          {!hasImage ? (
+            <div
+              className="image-card-empty-placeholder"
+              onClick={(e) => {
+                e.stopPropagation();
+                const input = document.getElementById(`image-file-input-${el.id}`) as HTMLInputElement | null;
+                input?.click();
               }}
-            />
-          </div>
+            >
+              <input
+                id={`image-file-input-${el.id}`}
+                type="file"
+                accept="image/*"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) {
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                      if (typeof reader.result === 'string') {
+                        onUploadImageForElement?.(el.id, reader.result);
+                      }
+                    };
+                    reader.readAsDataURL(file);
+                  }
+                }}
+              />
+              <div className="image-placeholder-icon-box">
+                <ImageIcon size={32} strokeWidth={1.5} color="#8a90a0" />
+              </div>
+              <span className="image-placeholder-title">Upload an image</span>
+              <span className="image-placeholder-sub">Tap or click to browse</span>
+            </div>
+          ) : (
+            <div className="image-photo-wrap" style={(!inColumn && Boolean(el.content?.show_caption) && ((dragRef.current?.isResize && dragRef.current?.elementId === el.id && dragRef.current?.liveHeight) ? dragRef.current.liveHeight : el.height)) ? { height: `${(dragRef.current?.isResize && dragRef.current?.elementId === el.id && dragRef.current?.liveHeight) ? dragRef.current.liveHeight : el.height}px`, borderRadius: 0, position: 'relative' } : { borderRadius: 0, position: 'relative' }}>
+              <img
+                src={el.content.url}
+                alt="Art"
+                style={{ borderRadius: 0 }}
+                onLoad={(e) => {
+                  const img = e.currentTarget;
+                  if (!inColumn && img.naturalWidth && img.naturalHeight) {
+                    const naturalAspect = img.naturalWidth / img.naturalHeight;
+                    const currentWidth = el.width || 340;
+                    const currentHeight = el.height || 220;
+                    const currentAspect = currentWidth / currentHeight;
+                    if (Math.abs(naturalAspect - currentAspect) > 0.02) {
+                      const optimalHeight = Math.max(40, Math.round(currentWidth / naturalAspect));
+                      onUpdateElementPositions([{ id: el.id, x: el.x, y: el.y, width: currentWidth, height: optimalHeight, z_index: el.z_index || 10 }]);
+                    }
+                  }
+                }}
+              />
+              {isSelected && (
+                <button
+                  type="button"
+                  className="image-card-replace-overlay-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const input = document.getElementById(`image-file-input-${el.id}`) as HTMLInputElement | null;
+                    input?.click();
+                  }}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onTouchStart={(e) => e.stopPropagation()}
+                  title="Replace image"
+                >
+                  <input
+                    id={`image-file-input-${el.id}`}
+                    type="file"
+                    accept="image/*"
+                    style={{ display: 'none' }}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      if (file) {
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                          if (typeof reader.result === 'string') {
+                            onUploadImageForElement?.(el.id, reader.result);
+                          }
+                        };
+                        reader.readAsDataURL(file);
+                      }
+                    }}
+                  />
+                  <span>Replace</span>
+                </button>
+              )}
+            </div>
+          )}
           {Boolean(el.content?.show_caption) && (
             <div 
               style={{ background: 'rgb(51, 51, 51)', padding: '8px 12px', width: '100%', minHeight: '56px', display: 'flex', flexDirection: 'column', justifyContent: 'center', cursor: isEditing ? 'text' : 'pointer' }} 
@@ -2808,18 +4104,12 @@ export const Canvas: React.FC<CanvasProps> = ({
                 if (!isEditing) onSetEditingElement(el.id);
               }}
             >
-              <div
-                className="note-rich-editor image-caption-editor"
-                contentEditable={isEditing}
-                suppressContentEditableWarning={true}
-                data-placeholder="Add a caption..."
-                style={{ color: '#e4ebf7', minHeight: '20px', outline: 'none', fontSize: '13.5px' }}
-                onBlur={(e) => {
-                  if (el.content.caption !== e.currentTarget.innerHTML) {
-                    onContentChange(el.id, { ...el.content, caption: e.currentTarget.innerHTML });
-                  }
-                }}
-                dangerouslySetInnerHTML={{ __html: el.content.caption || '' }}
+              <ImageCaptionEditorComponent
+                id={el.id}
+                isEditing={isEditing}
+                caption={el.content.caption || ''}
+                onContentChange={onContentChange}
+                elContent={el.content}
               />
             </div>
           )}
@@ -2868,6 +4158,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                     onContextMenu={(e) => {
                       e.preventDefault();
                       e.stopPropagation();
+                      if (isTouchHoldContextMenu(e)) return;
                       if (selectedElementId !== el.id) onSelectElement(el.id);
                       const colCells = Array.from({ length: rows }, (_, r) => r * cols + colIdx + 1);
                       setSelectedTableCell({ tableId: el.id, cellIndex: colCells[0] });
@@ -2886,6 +4177,14 @@ export const Canvas: React.FC<CanvasProps> = ({
                         headerResizeRef.current = val;
                         setHeaderResize(val);
                       }} 
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        const val = { type: 'col' as const, tableId: el.id, index: colIdx, startX: e.clientX, startY: e.clientY, startValue: colWidths[colIdx] || 100 };
+                        headerResizeRef.current = val;
+                        setHeaderResize(val);
+                      }}
+                      onTouchStart={(e) => e.stopPropagation()}
                     />
                   </div>
                 );
@@ -2926,6 +4225,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                         onContextMenu={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
+                          if (isTouchHoldContextMenu(e)) return;
                           if (selectedElementId !== el.id) onSelectElement(el.id);
                           const rowCells = Array.from({ length: cols }, (_, c) => (r - 1) * cols + c + 1);
                           setSelectedTableCell({ tableId: el.id, cellIndex: rowCells[0] });
@@ -2944,6 +4244,14 @@ export const Canvas: React.FC<CanvasProps> = ({
                             headerResizeRef.current = val;
                             setHeaderResize(val);
                           }} 
+                          onPointerDown={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            const val = { type: 'row' as const, tableId: el.id, index: r - 1, startX: e.clientX, startY: e.clientY, startValue: rowHeights[r - 1] || 38 };
+                            headerResizeRef.current = val;
+                            setHeaderResize(val);
+                          }}
+                          onTouchStart={(e) => e.stopPropagation()}
                         />
                       </div>
                     );
@@ -2982,6 +4290,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                           onContextMenu={(e) => {
                             e.preventDefault();
                             e.stopPropagation();
+                            if (isTouchHoldContextMenu(e)) return;
                             if (!isSelected) onSelectElement(el.id);
                             if (!isCellSelected(cellIndex)) {
                               setSelectedTableCell({ tableId: el.id, cellIndex });
@@ -3223,107 +4532,16 @@ export const Canvas: React.FC<CanvasProps> = ({
 
     return (
       <div 
-        style={{ width: '100%', height: '100%', minHeight: '26px', cursor: isEditing ? 'text' : 'grab', position: 'relative', color: textColor }} 
+        style={{ width: '100%', height: '100%', minHeight: '26px', cursor: isEditing ? 'text' : 'grab', position: 'relative', color: textColor, display: 'flex', flexDirection: 'column' }} 
         onDoubleClick={(e) => { e.stopPropagation(); onSetEditingElement(el.id); }}
       >
-        <div
-          className="note-rich-editor"
-          contentEditable={isEditing}
-          suppressContentEditableWarning={true}
-          data-placeholder="Start typing..."
-          style={{ color: 'inherit' }}
-          onKeyDown={(e) => {
-            if (e.key === 'Tab') {
-              e.preventDefault();
-              e.stopPropagation();
-              const selection = window.getSelection();
-              if (!selection || selection.rangeCount === 0) return;
-              
-              let node: Node | null = selection.anchorNode;
-              let inList = false;
-              while (node && node !== e.currentTarget) {
-                if (node.nodeName === 'LI' || node.nodeName === 'UL' || node.nodeName === 'OL') {
-                  inList = true;
-                  break;
-                }
-                node = node.parentNode;
-              }
-
-              if (inList) {
-                if (e.shiftKey) {
-                  document.execCommand('outdent', false, undefined);
-                } else {
-                  document.execCommand('indent', false, undefined);
-                }
-              } else {
-                if (!e.shiftKey) {
-                  if (!document.execCommand('insertHTML', false, '&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;')) {
-                    document.execCommand('insertText', false, '        ');
-                  }
-                }
-              }
-            }
-          }}
-          onMouseDown={(e) => {
-            const target = e.target as HTMLElement;
-            if (isEditing || target.closest('a') || target.closest('.milanote-inline-comment')) {
-              e.stopPropagation();
-            }
-          }}
-          onClick={(e) => {
-            const target = e.target as HTMLElement;
-            const commentSpan = target.closest('.milanote-inline-comment') as HTMLElement | null;
-            if (commentSpan) {
-              e.stopPropagation();
-              const commentId = commentSpan.getAttribute('data-comment-id');
-              if (commentId) {
-                const rect = commentSpan.getBoundingClientRect();
-                setActiveInlineComment({
-                  elementId: el.id,
-                  commentId,
-                  rect: { top: rect.bottom + 8, left: rect.right - 20 }
-                });
-                return;
-              }
-            }
-            const linkTag = target.closest('a') as HTMLAnchorElement | null;
-            if (linkTag) {
-              e.preventDefault();
-              e.stopPropagation();
-              if (linkTag.href && linkTag.href.trim() !== '') {
-                openExternalUrl(linkTag.href);
-              }
-            }
-          }}
-          onInput={(e) => {
-            const target = e.currentTarget;
-            const html = target.innerHTML;
-            const text = target.textContent || '';
-            const hasFormatting = html.includes('<ul') || html.includes('<ol') || html.includes('<li') || html.includes('text-align') || html.includes('&nbsp;') || html.includes('\u00A0') || html.includes('<h') || html.includes('<pre') || html.includes('<blockquote') || text.length > 0;
-            if (text.trim() === '' && !hasFormatting) {
-              if (target.innerHTML === '<br>' || target.innerHTML === '<div><br></div>' || target.innerHTML === '<p><br></p>') {
-                target.innerHTML = '';
-              }
-            }
-          }}
-          onBlur={(e) => {
-            const target = e.currentTarget;
-            const text = target.textContent || '';
-            const html = target.innerHTML;
-            const hasFormatting = html.includes('<ul') || html.includes('<ol') || html.includes('<li') || html.includes('text-align') || html.includes('&nbsp;') || html.includes('\u00A0') || text.length > 0;
-            const cleanText = (text.trim() === '' && !hasFormatting) ? '' : html;
-            onContentChange(el.id, { ...el.content, text: cleanText });
-          }}
-          dangerouslySetInnerHTML={{
-            __html: (() => {
-              const text = el.content.text || '';
-              const hasFormatting = text.includes('<ul') || text.includes('<ol') || text.includes('<li') || text.includes('text-align') || text.includes('&nbsp;') || text.includes('\u00A0');
-              if (text.replace(/<[^>]*>/g, '').trim() === '' && !hasFormatting) {
-                return '';
-              }
-              return text;
-            })()
-          }}
+        <NoteRichEditorComponent
+          key={el.id}
+          id={el.id}
+          isEditing={isEditing}
+          content={el.content}
+          onContentChange={onContentChange}
+          setActiveInlineComment={setActiveInlineComment}
         />
       </div>
     );
@@ -3335,7 +4553,12 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
 
     const isSelected = selectedElementId === el.id || selectedIds.includes(el.id);
-    const isDragging = activeDragId === el.id || Boolean(dragRef.current?.dragGroup.some(g => g.id === el.id));
+    const isDragging = Boolean(
+      dragRef.current &&
+      dragRef.current.hasExceededThreshold &&
+      !dragRef.current.isResize &&
+      (activeDragId === el.id || dragRef.current.dragGroup.some(g => g.id === el.id))
+    );
     const isBoard = el.element_type === 'nested_board';
     const isEditing = editingElementId === el.id;
 
@@ -3345,37 +4568,38 @@ export const Canvas: React.FC<CanvasProps> = ({
       const boardCount = children.filter((c) => c.element_type === 'nested_board').length;
       const cardCount = children.length - boardCount;
       const countSubtitle = `${boardCount > 0 ? `${boardCount} board${boardCount > 1 ? 's' : ''}${cardCount > 0 ? ', ' : ''}` : ''}${cardCount > 0 ? `${cardCount} card${cardCount > 1 ? 's' : ''}` : (boardCount === 0 ? '0 cards' : '')}`;
+      const isThisResizing = Boolean(dragRef.current?.isResize && dragRef.current?.elementId === el.id);
+      const liveW = isThisResizing && dragRef.current?.liveWidth ? dragRef.current.liveWidth : (el.width || 340);
       const dragItem = isDragging ? dragRef.current?.dragGroup.find(g => g.id === el.id) : null;
       const posX = (dragItem && dragItem.currentX !== undefined) ? dragItem.currentX : el.x;
       const posY = (dragItem && dragItem.currentY !== undefined) ? dragItem.currentY : el.y;
-      const isActiveDrag = Boolean(isDragging && dragRef.current?.hasExceededThreshold && !inColumn);
-      const screenPos = isActiveDrag ? canvasToScreen(posX, posY) : { x: 0, y: 0 };
-
+      const isDesktop = !isTouchPrimary() && !isPhoneScreen();
+      const tiltDeg = (isDragging && isDesktop) ? (dragRef.current?.currentTilt || 0).toFixed(2) : '0';
+      const colTransform = isThisResizing
+        ? `translate3d(${el.x}px, ${el.y}px, 0)`
+        : (isDragging
+            ? (isDesktop
+                ? `translate3d(${posX}px, ${posY}px, 0) scale(1.02) rotate(${tiltDeg}deg)`
+                : `translate3d(${posX}px, ${posY}px, 0)`)
+            : `translate3d(${el.x}px, ${el.y}px, 0)`);
       return (
-        <React.Fragment key={el.id}>
-          <div
-            id={`milanote-el-${el.id}`}
+        <div
+          key={el.id}
+          id={`milanote-el-${el.id}`}
             className={`milanote-card column-card ${isSelected ? 'selected' : ''} ${isDragging ? 'dragging' : ''} ${isCollapsed ? 'collapsed' : ''} ${inColumn ? 'column-inner-card' : ''}`}
             style={inColumn ? {
               backgroundColor: el.style?.background_color || undefined,
               color: isLightColor(el.style?.background_color) ? '#2d3340' : undefined,
               width: '100%',
               height: 'auto',
-              ...(isDragging && dragRef.current?.hasExceededThreshold ? { position: 'fixed', zIndex: 999999 } : {})
+              ...(isDragging && dragRef.current?.hasExceededThreshold && !dragRef.current?.isResize ? { position: 'fixed', zIndex: 999999 } : {})
             } : {
-              transform: `translate(${posX}px, ${posY}px)`,
-              width: el.width || 340,
+              transform: colTransform,
+              width: liveW,
               zIndex: isDragging ? 99999 : (el.z_index || 5),
               backgroundColor: el.style?.background_color || undefined,
               color: isLightColor(el.style?.background_color) ? '#2d3340' : undefined,
-              opacity: isActiveDrag ? 0 : 1,
-            }}
-            onMouseDown={(e) => {
-              if (customMouseDown) {
-                customMouseDown(e, el);
-              } else {
-                handleElementMouseDown(e, el, false, undefined, inColumn);
-              }
+              opacity: 1,
             }}
             onPointerDown={(e) => {
               if (customMouseDown) {
@@ -3386,21 +4610,21 @@ export const Canvas: React.FC<CanvasProps> = ({
             }}
             onClick={(e) => {
               e.stopPropagation();
+              if (Date.now() - lastPinchEndTimeRef.current < 300) return;
               if (dragOccurredRef.current) {
                 dragOccurredRef.current = false;
                 return;
               }
-              if (e.ctrlKey || e.metaKey) return;
-              if (selectedElementId === el.id && editingElementId !== el.id) {
-                onSetEditingElement(el.id);
-              } else if (selectedElementId !== el.id) {
+              if (e.ctrlKey || e.metaKey || isSpacePressedRef.current) return;
+              if (selectedElementId !== el.id || selectedIds.length > 1) {
                 onSelectElement(el.id);
+                if (onMultiSelect) onMultiSelect([el.id]);
               }
             }}
             onContextMenu={(e) => {
               e.preventDefault();
               e.stopPropagation();
-              if (isTouchPrimary() || isPhoneScreen()) return;
+              if (isTouchHoldContextMenu(e)) return;
               onContextMenu(e, el);
             }}
           >
@@ -3457,7 +4681,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                 onDrop={(e) => handleColumnDrop(e, el.id)}
               >
                 {(() => {
-                  const isDragActive = Boolean(activeDragId && dragRef.current?.hasExceededThreshold);
+                  const isDragActive = Boolean(activeDragId && dragRef.current?.hasExceededThreshold && !dragRef.current?.isResize);
                   if (!isDragActive) {
                     if (children.length === 0) {
                       return <div className="column-empty-placeholder" />;
@@ -3493,56 +4717,29 @@ export const Canvas: React.FC<CanvasProps> = ({
             )}
 
             {!inColumn && !el.style?.is_unsorted && (
-              <>
-                <div className="resize-handle-e" onMouseDown={(e) => handleElementMouseDown(e, el, true, 'e')} />
-                <div className="card-diagonal-grip-se" onMouseDown={(e) => handleElementMouseDown(e, el, true, 'se')} />
-              </>
+              <div
+                className="card-diagonal-grip-se"
+                onPointerDown={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleElementMouseDown(e, el, true, 'se');
+                }}
+                onTouchStart={(e) => {
+                  if (e.cancelable) e.preventDefault();
+                  e.stopPropagation();
+                }}
+                onTouchMove={(e) => {
+                  if (e.cancelable) e.preventDefault();
+                  e.stopPropagation();
+                }}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  handleElementMouseDown(e, el, true, 'se');
+                }}
+              />
             )}
           </div>
-
-          {isActiveDrag && document.body && createPortal(
-            <div
-              id={`milanote-drag-portal-${el.id}`}
-              className={`milanote-card column-card selected dragging ${isCollapsed ? 'collapsed' : ''}`}
-              style={{
-                position: 'fixed',
-                left: `${screenPos.x}px`,
-                top: `${screenPos.y}px`,
-                width: el.width || 340,
-                transform: `scale(${scale})`,
-                transformOrigin: 'top left',
-                zIndex: 9999999,
-                backgroundColor: el.style?.background_color || undefined,
-                color: isLightColor(el.style?.background_color) ? '#2d3340' : undefined,
-                boxShadow: '0 16px 40px rgba(0,0,0,0.45)',
-                pointerEvents: 'none',
-              }}
-            >
-              {Boolean(el.style?.top_strip_color) && (
-                <div className="note-top-strip-bar" style={{ backgroundColor: el.style?.top_strip_color }} />
-              )}
-              <div className="column-header">
-                <input
-                  className="column-title-serif"
-                  readOnly
-                  value={el.content.title || 'New Column'}
-                  style={{ color: isLightColor(el.style?.background_color) ? '#2d3340' : undefined }}
-                />
-                <div className="column-subtitle-cards" style={{ color: isLightColor(el.style?.background_color) ? '#4a5568' : undefined }}>{countSubtitle}</div>
-              </div>
-              {!isCollapsed && (
-                <div className="column-drop-well">
-                  {children.length === 0 ? (
-                    <div className="column-empty-placeholder" />
-                  ) : (
-                    children.map((child) => renderStandardCard(child, true))
-                  )}
-                </div>
-              )}
-            </div>,
-            document.body
-          )}
-        </React.Fragment>
       );
     }
 
@@ -3553,29 +4750,26 @@ export const Canvas: React.FC<CanvasProps> = ({
       const dragItem = isDragging ? dragRef.current?.dragGroup.find(g => g.id === el.id) : null;
       const posX = (dragItem && dragItem.currentX !== undefined) ? dragItem.currentX : el.x;
       const posY = (dragItem && dragItem.currentY !== undefined) ? dragItem.currentY : el.y;
-      const isActiveDrag = Boolean(isDragging && dragRef.current?.hasExceededThreshold);
-      const screenPos = isActiveDrag ? canvasToScreen(posX, posY) : { x: 0, y: 0 };
-
+      const isDesktop = !isTouchPrimary() && !isPhoneScreen();
+      const tiltDeg = (isDragging && isDesktop) ? (dragRef.current?.currentTilt || 0).toFixed(2) : '0';
+      const boardTransform = isDragging
+        ? (isDesktop
+            ? `translate3d(${posX}px, ${posY}px, 0) scale(1.02) rotate(${tiltDeg}deg)`
+            : `translate3d(${posX}px, ${posY}px, 0)`)
+        : `translate3d(${posX}px, ${posY}px, 0)`;
       return (
-        <React.Fragment key={el.id}>
-          <div
-            id={`milanote-el-${el.id}`}
+        <div
+          key={el.id}
+          id={`milanote-el-${el.id}`}
             className={`board-card-vertical ${isSelected ? 'selected' : ''} ${isDragging ? 'dragging' : ''} ${(hoveredBoardId === el.id || (el.content?.target_board_id && hoveredBoardId === el.content.target_board_id)) ? 'hover-enter-target' : ''}`}
             style={{
-              transform: `translate(${posX}px, ${posY}px)`,
+              transform: boardTransform,
               position: 'absolute',
               top: 0,
               left: 0,
               zIndex: isDragging ? 99999 : (el.z_index || 10),
               userSelect: 'none',
-              opacity: isActiveDrag ? 0 : 1,
-            }}
-            onMouseDown={(e) => {
-              if (customMouseDown) {
-                customMouseDown(e, el);
-              } else {
-                handleElementMouseDown(e, el, false, undefined, false);
-              }
+              opacity: 1,
             }}
             onPointerDown={(e) => {
               if (customMouseDown) {
@@ -3587,21 +4781,21 @@ export const Canvas: React.FC<CanvasProps> = ({
             onDoubleClick={(e) => { e.stopPropagation(); onOpenBoard(el.content.shortcut_target_id || el.id); }}
             onClick={(e) => {
               e.stopPropagation();
+              if (Date.now() - lastPinchEndTimeRef.current < 300) return;
               if (dragOccurredRef.current) {
                 dragOccurredRef.current = false;
                 return;
               }
-              if (e.ctrlKey || e.metaKey) return;
-              if (selectedElementId === el.id && editingElementId !== el.id) {
-                onSetEditingElement(el.id);
-              } else if (selectedElementId !== el.id) {
+              if (e.ctrlKey || e.metaKey || isSpacePressedRef.current) return;
+              if (selectedElementId !== el.id || selectedIds.length > 1) {
                 onSelectElement(el.id);
+                if (onMultiSelect) onMultiSelect([el.id]);
               }
             }}
             onContextMenu={(e) => {
               e.preventDefault();
               e.stopPropagation();
-              if (isTouchPrimary() || isPhoneScreen()) return;
+              if (isTouchHoldContextMenu(e)) return;
               onContextMenu(e, el);
             }}
           >
@@ -3635,6 +4829,11 @@ export const Canvas: React.FC<CanvasProps> = ({
                 className="card-quick-connect-handle"
                 title="Drag to connect"
                 onMouseDown={(e) => handleQuickConnectStart(e, el)}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  handleQuickConnectStart(e, el);
+                }}
+                onTouchStart={(e) => e.stopPropagation()}
               />
             )}
             {isEditing ? (
@@ -3667,30 +4866,6 @@ export const Canvas: React.FC<CanvasProps> = ({
             )}
             <div className="board-subtitle-text">{badge.cards}</div>
           </div>
-
-          {isActiveDrag && document.body && createPortal(
-            <div
-              id={`milanote-drag-portal-${el.id}`}
-              className="board-card-vertical selected dragging"
-              style={{
-                position: 'fixed',
-                left: `${screenPos.x}px`,
-                top: `${screenPos.y}px`,
-                transform: `scale(${scale})`,
-                transformOrigin: 'top left',
-                zIndex: 9999999,
-                pointerEvents: 'none',
-              }}
-            >
-              <div className="board-icon-badge" style={{ background: boardBg }}>
-                {BadgeIcon && <BadgeIcon size={36} color="#ffffff" />}
-              </div>
-              <div className="board-title-text">{el.content.title || 'New Board'}</div>
-              <div className="board-subtitle-text">{badge.cards}</div>
-            </div>,
-            document.body
-          )}
-        </React.Fragment>
       );
     }
 
@@ -3703,40 +4878,42 @@ export const Canvas: React.FC<CanvasProps> = ({
     const customBg = el.style?.background_color;
     const topStrip = el.style?.top_strip_color;
     const useDarkText = isLightColor(customBg);
+    const isThisResizing = Boolean(dragRef.current?.isResize && dragRef.current?.elementId === el.id);
+    const liveW = isThisResizing && dragRef.current?.liveWidth ? dragRef.current.liveWidth : cardWidth;
+    const liveH = isThisResizing && dragRef.current?.liveHeight ? dragRef.current.liveHeight : cardHeight;
     const dragItem = isDragging ? dragRef.current?.dragGroup.find(g => g.id === el.id) : null;
     const posX = (dragItem && dragItem.currentX !== undefined) ? dragItem.currentX : el.x;
     const posY = (dragItem && dragItem.currentY !== undefined) ? dragItem.currentY : el.y;
-    const isActiveDrag = Boolean(isDragging && dragRef.current?.hasExceededThreshold && !inColumn);
-    const screenPos = isActiveDrag ? canvasToScreen(posX, posY) : { x: 0, y: 0 };
-
+    const isDesktop = !isTouchPrimary() && !isPhoneScreen();
+    const tiltDeg = (isDragging && isDesktop) ? (dragRef.current?.currentTilt || 0).toFixed(2) : '0';
+    const cardTransform = isThisResizing
+      ? `translate3d(${el.x}px, ${el.y}px, 0)`
+      : (isDragging
+          ? (isDesktop
+              ? `translate3d(${posX}px, ${posY}px, 0) scale(1.02) rotate(${tiltDeg}deg)`
+              : `translate3d(${posX}px, ${posY}px, 0)`)
+          : `translate3d(${el.x}px, ${el.y}px, 0)`);
     return (
-      <React.Fragment key={el.id}>
-        <div
-          id={`milanote-el-${el.id}`}
-          className={`milanote-card ${isSelected ? 'selected' : ''} ${isDragging ? 'dragging' : ''} ${inColumn ? 'column-inner-card' : ''} ${el.element_type === 'note' ? 'note-card-wrapper' : ''} ${el.element_type === 'task_list' ? 'task-list-card-wrapper' : ''} ${el.element_type === 'image' ? 'image-card-wrapper' : ''} ${el.element_type === 'image' && el.style?.is_transparent ? 'image-transparent' : ''} ${el.element_type === 'link' ? 'link-card-wrapper' : ''} ${el.element_type === 'link' && !Boolean(el.content?.url && el.content.url.trim().length > 0) ? 'link-empty-wrapper' : ''} ${el.element_type === 'table' ? 'table-card-wrapper' : ''} ${isComment ? 'comment-card-wrapper' : ''} ${dragOverTaskListId === el.id ? 'task-list-merge-target' : ''}`}
-          style={inColumn ? {
-            backgroundColor: customBg || undefined,
-            color: useDarkText ? '#2d3340' : undefined,
-            minHeight: (el.element_type === 'note' || el.element_type === 'task_list' || el.element_type === 'link') ? 60 : undefined,
-            height: 'auto',
-            ...(isDragging && dragRef.current?.hasExceededThreshold ? { position: 'fixed', zIndex: 999999 } : {})
-          } : {
-            transform: `translate(${posX}px, ${posY}px)`,
-            width: el.element_type === 'table' ? 'fit-content' : (isPinnedComment ? 18 : cardWidth),
-            height: (el.element_type === 'note' || el.element_type === 'task_list' || isComment || (el.element_type === 'link' && !isCustomResizedVideo) || (el.element_type === 'image' && (inColumn || Boolean(el.content?.show_caption))) || el.element_type === 'table') ? 'auto' : cardHeight,
-            minHeight: (el.element_type === 'note' || el.element_type === 'task_list' || (el.element_type === 'link' && !isCustomResizedVideo)) ? 60 : ((isComment || el.element_type === 'table') ? 0 : cardHeight),
-            zIndex: isDragging ? 99999 : (isComment ? 50000 + (el.z_index || 0) : (el.z_index || 10)),
-            backgroundColor: customBg || undefined,
-            color: useDarkText ? '#2d3340' : undefined,
-            opacity: isActiveDrag ? 0 : 1,
-          }}
-          onMouseDown={(e) => {
-            if (customMouseDown) {
-              customMouseDown(e, el);
-            } else {
-              handleElementMouseDown(e, el, false, undefined, inColumn);
-            }
-          }}
+      <div
+        key={el.id}
+        id={`milanote-el-${el.id}`}
+        className={`milanote-card ${isSelected ? 'selected' : ''} ${isDragging ? 'dragging' : ''} ${inColumn ? 'column-inner-card' : ''} ${el.element_type === 'note' ? 'note-card-wrapper' : ''} ${el.element_type === 'task_list' ? 'task-list-card-wrapper' : ''} ${el.element_type === 'image' ? 'image-card-wrapper' : ''} ${el.element_type === 'image' && el.style?.is_transparent ? 'image-transparent' : ''} ${el.element_type === 'link' ? 'link-card-wrapper' : ''} ${el.element_type === 'link' && !Boolean(el.content?.url && el.content.url.trim().length > 0) ? 'link-empty-wrapper' : ''} ${el.element_type === 'table' ? 'table-card-wrapper' : ''} ${isComment ? 'comment-card-wrapper' : ''} ${dragOverTaskListId === el.id ? 'task-list-merge-target' : ''}`}
+        style={inColumn ? {
+          backgroundColor: customBg || undefined,
+          color: useDarkText ? '#2d3340' : undefined,
+          minHeight: (el.element_type === 'note' || el.element_type === 'task_list' || el.element_type === 'link') ? 60 : undefined,
+          height: 'auto',
+          ...(isDragging && dragRef.current?.hasExceededThreshold && !dragRef.current?.isResize ? { position: 'fixed', zIndex: 999999 } : {})
+        } : {
+          transform: cardTransform,
+          width: el.element_type === 'table' ? 'fit-content' : (isPinnedComment ? 18 : liveW),
+          height: (inColumn || el.element_type === 'task_list' || isComment || (el.element_type === 'image' && Boolean(el.content?.show_caption)) || el.element_type === 'table' || (el.element_type === 'note' && !el.style?.is_custom_height && !isThisResizing && (!el.height || el.height <= 60)) || (el.element_type === 'link' && !el.style?.is_custom_size && !isThisResizing && (!el.height || el.height <= 60))) ? 'auto' : liveH,
+          minHeight: (el.element_type === 'task_list' || (el.element_type === 'note' && !el.style?.is_custom_height && !isThisResizing && (!el.height || el.height <= 60)) || (el.element_type === 'link' && !el.style?.is_custom_size && !isThisResizing && (!el.height || el.height <= 60))) ? 60 : ((isComment || el.element_type === 'table') ? 0 : Math.min(60, liveH)),
+          zIndex: isDragging ? 99999 : (isComment ? 50000 + (el.z_index || 0) : (el.z_index || 10)),
+          backgroundColor: customBg || undefined,
+          color: useDarkText ? '#2d3340' : undefined,
+          opacity: 1,
+        }}
           onPointerDown={(e) => {
             if (customMouseDown) {
               customMouseDown(e as any, el);
@@ -3747,21 +4924,21 @@ export const Canvas: React.FC<CanvasProps> = ({
           onDoubleClick={(e) => { e.stopPropagation(); onSetEditingElement(el.id); }}
           onClick={(e) => {
             e.stopPropagation();
+            if (Date.now() - lastPinchEndTimeRef.current < 300) return;
             if (dragOccurredRef.current) {
               dragOccurredRef.current = false;
               return;
             }
-            if (e.ctrlKey || e.metaKey) return;
-            if (selectedElementId === el.id && editingElementId !== el.id) {
-              onSetEditingElement(el.id);
-            } else if (selectedElementId !== el.id) {
+            if (e.ctrlKey || e.metaKey || isSpacePressedRef.current) return;
+            if (selectedElementId !== el.id || selectedIds.length > 1) {
               onSelectElement(el.id);
+              if (onMultiSelect) onMultiSelect([el.id]);
             }
           }}
           onContextMenu={(e) => {
             e.preventDefault();
             e.stopPropagation();
-            if (isTouchPrimary() || isPhoneScreen()) return;
+            if (isTouchHoldContextMenu(e)) return;
             onContextMenu(e, el);
           }}
         >
@@ -3773,81 +4950,84 @@ export const Canvas: React.FC<CanvasProps> = ({
           </div>
 
           {!inColumn && !isComment && el.element_type !== 'task_list' && (
-            <>
-              <div className="card-diagonal-grip-se" onMouseDown={(e) => handleElementMouseDown(e, el, true, 'se')} />
-              {el.element_type !== 'image' && (
-                <div className="resize-handle-e" onMouseDown={(e) => handleElementMouseDown(e, el, true, 'e')} />
-              )}
-            </>
+            <div
+              className="card-diagonal-grip-se"
+              onPointerDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                handleElementMouseDown(e, el, true, 'se');
+              }}
+              onTouchStart={(e) => {
+                if (e.cancelable) e.preventDefault();
+                e.stopPropagation();
+              }}
+              onTouchMove={(e) => {
+                if (e.cancelable) e.preventDefault();
+                e.stopPropagation();
+              }}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                handleElementMouseDown(e, el, true, 'se');
+              }}
+            />
           )}
           {isSelected && (
             <div
               className="card-quick-connect-handle"
               title="Drag to connect"
               onMouseDown={(e) => handleQuickConnectStart(e, el)}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                handleQuickConnectStart(e, el);
+              }}
+              onTouchStart={(e) => e.stopPropagation()}
             />
           )}
         </div>
-
-        {isActiveDrag && document.body && createPortal(
-          <div
-            id={`milanote-drag-portal-${el.id}`}
-            className={`milanote-card selected dragging ${el.element_type === 'note' ? 'note-card-wrapper' : ''} ${el.element_type === 'task_list' ? 'task-list-card-wrapper' : ''} ${el.element_type === 'image' ? 'image-card-wrapper' : ''} ${el.element_type === 'image' && el.style?.is_transparent ? 'image-transparent' : ''} ${el.element_type === 'link' ? 'link-card-wrapper' : ''} ${el.element_type === 'link' && !Boolean(el.content?.url && el.content.url.trim().length > 0) ? 'link-empty-wrapper' : ''} ${el.element_type === 'table' ? 'table-card-wrapper' : ''} ${isComment ? 'comment-card-wrapper' : ''}`}
-            style={{
-              position: 'fixed',
-              left: `${screenPos.x}px`,
-              top: `${screenPos.y}px`,
-              width: el.element_type === 'table' ? 'fit-content' : (isPinnedComment ? 18 : cardWidth),
-              height: (el.element_type === 'note' || el.element_type === 'task_list' || isComment || (el.element_type === 'link' && !isCustomResizedVideo) || (el.element_type === 'image' && Boolean(el.content?.show_caption)) || el.element_type === 'table') ? 'auto' : cardHeight,
-              minHeight: (el.element_type === 'note' || el.element_type === 'task_list' || (el.element_type === 'link' && !isCustomResizedVideo)) ? 60 : ((isComment || el.element_type === 'table') ? 0 : cardHeight),
-              transform: `scale(${scale})`,
-              transformOrigin: 'top left',
-              zIndex: 9999999,
-              backgroundColor: customBg || undefined,
-              color: useDarkText ? '#2d3340' : undefined,
-              boxShadow: '0 16px 40px rgba(0,0,0,0.45)',
-              pointerEvents: 'none',
-            }}
-          >
-            {Boolean(topStrip) && !isComment && (
-              <div className="note-top-strip-bar" style={{ backgroundColor: topStrip }} />
-            )}
-            <div className="card-body">
-              {renderCardContent(el, false)}
-            </div>
-          </div>,
-          document.body
-        )}
-      </React.Fragment>
     );
   };
 
-  const selectionRect = selectionBox ? {
+  const selectionRect = selectionBox && (Math.abs(selectionBox.currentX - selectionBox.startX) > 2 || Math.abs(selectionBox.currentY - selectionBox.startY) > 2) ? {
     left: Math.min(selectionBox.startX, selectionBox.currentX),
     top: Math.min(selectionBox.startY, selectionBox.currentY),
     width: Math.abs(selectionBox.currentX - selectionBox.startX),
     height: Math.abs(selectionBox.currentY - selectionBox.startY)
   } : null;
 
-  const dotAlpha = 0.09;
-  const dotRadius = Math.max(0.8, Number((scale * 0.9).toFixed(2)));
+  // Mathematically locked, jitter-free antialiased dot grid
+  const BASE_GRID = 22;
+  const scaledGrid = BASE_GRID * scale;
+  // Account for radial-gradient centering at (scaledGrid/2, scaledGrid/2):
+  // (pan - scaledGrid / 2) places the dot at exactly (pan + k * scaledGrid), matching canvas coordinates 1:1!
+  const rawX = pan.x - scaledGrid / 2;
+  const rawY = pan.y - scaledGrid / 2;
+  const gridPosX = Number((((rawX % scaledGrid) + scaledGrid) % scaledGrid).toFixed(3));
+  const gridPosY = Number((((rawY % scaledGrid) + scaledGrid) % scaledGrid).toFixed(3));
+  const gridPatternSize = Number(scaledGrid.toFixed(3));
+
+  // Antialiased dot sizing with perceptual scaling
+  const dotRadius = Math.max(0.65, Math.min(1.25, 0.82 * Math.pow(scale, 0.35)));
+  // Smooth opacity falloff when zoomed out below 0.65x zoom to prevent high-frequency moiré noise
+  const fade = Math.min(1, Math.max(0, (scale - 0.15) / 0.45));
+  const dotAlpha = Number((0.10 * fade).toFixed(3));
 
   return (
     <div
       ref={containerRef}
-      className="canvas-viewport"
+      className={`canvas-viewport ${isSpacePressed ? 'space-pressed' : ''} ${isPanning ? 'is-panning' : ''}`}
       data-pan-x={pan.x}
       data-pan-y={pan.y}
       onWheel={handleWheel}
-      onMouseDown={handleMouseDown}
       onPointerDown={handlePointerDown}
+      onMouseDown={handlePointerDown}
       onDoubleClick={handleDoubleClick}
       onDragOver={handleDragOver}
       onDrop={handleDrop}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (isTouchPrimary() || isPhoneScreen()) return;
+        if (isTouchHoldContextMenu(e)) return;
         const target = e.target as HTMLElement;
         if (target === containerRef.current || target.classList.contains('canvas-viewport') || target.classList.contains('canvas-plane') || target.classList.contains('canvas-viewport-grid')) {
           onContextMenu(e, null, screenToCanvas(e.clientX, e.clientY));
@@ -3857,9 +5037,11 @@ export const Canvas: React.FC<CanvasProps> = ({
       <div
         className="canvas-viewport-grid"
         style={{
-          backgroundPosition: `${pan.x}px ${pan.y}px`,
-          backgroundSize: `${11 * scale}px ${11 * scale}px`,
-          backgroundImage: scale >= 1.0 ? `radial-gradient(rgba(255, 255, 255, ${dotAlpha}) ${dotRadius}px, transparent 0)` : 'none',
+          backgroundPosition: `${gridPosX}px ${gridPosY}px`,
+          backgroundSize: `${gridPatternSize}px ${gridPatternSize}px`,
+          backgroundImage: dotAlpha > 0.005
+            ? `radial-gradient(circle, rgba(255, 255, 255, ${dotAlpha}) ${dotRadius.toFixed(2)}px, rgba(255, 255, 255, 0) ${(dotRadius + 0.85).toFixed(2)}px)`
+            : 'none',
         }}
       />
 
@@ -3884,6 +5066,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         {/* INTERACTIVE LINES LAYER (BASE SVG UNDER CARDS FOR UNSELECTED LINES) */}
         <svg
           className="milanote-lines-layer"
+          shapeRendering="geometricPrecision"
           style={{ position: 'absolute', top: 0, left: 0, width: '1px', height: '1px', overflow: 'visible', zIndex: 12, pointerEvents: 'none' }}
         >
           <defs>
@@ -3936,9 +5119,69 @@ export const Canvas: React.FC<CanvasProps> = ({
                   style={{ cursor: 'move', pointerEvents: 'auto' }}
                   onClick={(evt) => {
                     evt.stopPropagation();
+                    if (evt.ctrlKey || evt.metaKey || isSpacePressedRef.current) return;
                     onSelectElement(el.id);
+                    if (onMultiSelect) onMultiSelect([el.id]);
                   }}
                   onMouseDown={(evt) => {
+                    if (isSpacePressedRef.current && evt.button === 0) {
+                      evt.preventDefault();
+                      setIsPanning(true);
+                      panStartRef.current = { x: evt.clientX, y: evt.clientY, startPanX: pan.x, startPanY: pan.y };
+                      return;
+                    }
+                    if (evt.button === 1 || evt.buttons === 4) {
+                      evt.preventDefault();
+                      setIsPanning(true);
+                      panStartRef.current = { x: evt.clientX, y: evt.clientY, startPanX: pan.x, startPanY: pan.y };
+                      return;
+                    }
+                    if ((evt.ctrlKey || evt.metaKey) && evt.button === 0) {
+                      evt.preventDefault();
+                      evt.stopPropagation();
+                      const currentSelected = selectedIds.length > 0 ? [...selectedIds] : (selectedElementId ? [selectedElementId] : []);
+                      const index = currentSelected.indexOf(el.id);
+                      let nextSelected: string[];
+                      if (index >= 0) {
+                        nextSelected = currentSelected.filter((id) => id !== el.id);
+                      } else {
+                        nextSelected = [...currentSelected, el.id];
+                      }
+                      if (onMultiSelect) {
+                        onMultiSelect(nextSelected);
+                      } else {
+                        onSelectElement(nextSelected.length > 0 ? nextSelected[nextSelected.length - 1] : null);
+                      }
+                      return;
+                    }
+                    evt.stopPropagation();
+                    onSelectElement(el.id);
+                    if (onMultiSelect) onMultiSelect([el.id]);
+                    const sPt = computeLineEndpoint(el, content, true);
+                    const ePt = computeLineEndpoint(el, content, false);
+                    const connectedIds: string[] = [];
+                    if (content.start_target_id) connectedIds.push(content.start_target_id);
+                    if (content.end_target_id && !connectedIds.includes(content.end_target_id)) connectedIds.push(content.end_target_id);
+                    const connectedItems = connectedIds.map((cid) => {
+                      const found = elements.find((x) => x.id === cid);
+                      return found ? { id: found.id, origX: found.x, origY: found.y, width: found.width, height: found.height, zIndex: found.z_index } : null;
+                    }).filter(Boolean) as Array<{ id: string; origX: number; origY: number; width: number; height: number; zIndex: number }>;
+
+                    lineHandleDragRef.current = {
+                      lineId: el.id,
+                      handle: 'move',
+                      origStartX: sPt.x - el.x,
+                      origStartY: sPt.y - el.y,
+                      origEndX: ePt.x - el.x,
+                      origEndY: ePt.y - el.y,
+                      startMouseX: evt.clientX,
+                      startMouseY: evt.clientY,
+                      origContent: { ...content },
+                      connectedItems
+                    };
+                    setActiveLineHandleDrag(el.id);
+                  }}
+                  onPointerDown={(evt) => {
                     evt.stopPropagation();
                     onSelectElement(el.id);
                     const sPt = computeLineEndpoint(el, content, true);
@@ -3965,9 +5208,11 @@ export const Canvas: React.FC<CanvasProps> = ({
                     };
                     setActiveLineHandleDrag(el.id);
                   }}
+                  onTouchStart={(evt) => evt.stopPropagation()}
                   onContextMenu={(evt) => {
                     evt.preventDefault();
                     evt.stopPropagation();
+                    if (isTouchHoldContextMenu(evt)) return;
                     onContextMenu(evt, el);
                   }}
                 />
@@ -3996,6 +5241,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         {/* INTERACTIVE OVERLAY FOR SELECTED LINES, HANDLES, AND SNAP MARKERS ABOVE CARDS */}
         <svg
           className="milanote-lines-interactive-overlay"
+          shapeRendering="geometricPrecision"
           style={{ position: 'absolute', top: 0, left: 0, width: '1px', height: '1px', overflow: 'visible', zIndex: 9999, pointerEvents: 'none' }}
         >
           <defs>
@@ -4060,6 +5306,65 @@ export const Canvas: React.FC<CanvasProps> = ({
                   fill="none"
                   style={{ cursor: 'move', pointerEvents: 'auto' }}
                   onMouseDown={(evt) => {
+                    if (isSpacePressedRef.current && evt.button === 0) {
+                      evt.preventDefault();
+                      setIsPanning(true);
+                      panStartRef.current = { x: evt.clientX, y: evt.clientY, startPanX: pan.x, startPanY: pan.y };
+                      return;
+                    }
+                    if (evt.button === 1 || evt.buttons === 4) {
+                      evt.preventDefault();
+                      setIsPanning(true);
+                      panStartRef.current = { x: evt.clientX, y: evt.clientY, startPanX: pan.x, startPanY: pan.y };
+                      return;
+                    }
+                    if ((evt.ctrlKey || evt.metaKey) && evt.button === 0) {
+                      evt.preventDefault();
+                      evt.stopPropagation();
+                      const currentSelected = selectedIds.length > 0 ? [...selectedIds] : (selectedElementId ? [selectedElementId] : []);
+                      const index = currentSelected.indexOf(el.id);
+                      let nextSelected: string[];
+                      if (index >= 0) {
+                        nextSelected = currentSelected.filter((id) => id !== el.id);
+                      } else {
+                        nextSelected = [...currentSelected, el.id];
+                      }
+                      if (onMultiSelect) {
+                        onMultiSelect(nextSelected);
+                      } else {
+                        onSelectElement(nextSelected.length > 0 ? nextSelected[nextSelected.length - 1] : null);
+                      }
+                      return;
+                    }
+                    evt.stopPropagation();
+                    onSelectElement(el.id);
+                    if (onMultiSelect) onMultiSelect([el.id]);
+                    const sPt = computeLineEndpoint(el, content, true);
+                    const ePt = computeLineEndpoint(el, content, false);
+                    const connectedIds: string[] = [];
+                    if (content.start_target_id) connectedIds.push(content.start_target_id);
+                    if (content.end_target_id && !connectedIds.includes(content.end_target_id)) connectedIds.push(content.end_target_id);
+                    const connectedItems = connectedIds.map((cid) => {
+                      const found = elements.find((x) => x.id === cid);
+                      return found ? { id: found.id, origX: found.x, origY: found.y, width: found.width, height: found.height, zIndex: found.z_index } : null;
+                    }).filter(Boolean) as Array<{ id: string; origX: number; origY: number; width: number; height: number; zIndex: number }>;
+
+                    lineHandleDragRef.current = {
+                      lineId: el.id,
+                      handle: 'move',
+                      origStartX: sPt.x - el.x,
+                      origStartY: sPt.y - el.y,
+                      origEndX: ePt.x - el.x,
+                      origEndY: ePt.y - el.y,
+                      startMouseX: evt.clientX,
+                      startMouseY: evt.clientY,
+                      origContent: { ...content },
+                      connectedItems
+                    };
+                    setActiveLineHandleDrag(el.id);
+                  }}
+                  onPointerDown={(evt) => {
+                    if (evt.pointerType === 'mouse') return;
                     evt.stopPropagation();
                     onSelectElement(el.id);
                     const sPt = computeLineEndpoint(el, content, true);
@@ -4086,6 +5391,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                     };
                     setActiveLineHandleDrag(el.id);
                   }}
+                  onTouchStart={(evt) => evt.stopPropagation()}
                 />
                 {/* VISIBLE SELECTED CURVED LINE ABOVE CARDS */}
                 <path
@@ -4098,42 +5404,89 @@ export const Canvas: React.FC<CanvasProps> = ({
                   markerEnd={eArrow === 'arrow' ? `url(#arrow-end-selected-${el.id})` : undefined}
                   style={{ pointerEvents: 'none' }}
                 />
-                {/* INTERACTIVE DRAG HANDLES */}
+                {/* INTERACTIVE DRAG HANDLES WITH LARGE TOUCH TARGETS */}
+                {/* START ENDPOINT */}
                 <circle
                   cx={s.x}
                   cy={s.y}
-                  r={5}
-                  className="line-handle-circle"
-                  style={{ pointerEvents: 'auto' }}
+                  r={22}
+                  fill="transparent"
+                  style={{ pointerEvents: 'auto', cursor: 'grab', touchAction: 'none' }}
                   onMouseDown={(evt) => {
                     evt.stopPropagation();
                     lineHandleDragRef.current = { lineId: el.id, handle: 'start' };
                     setActiveLineHandleDrag(el.id);
                   }}
+                  onPointerDown={(evt) => {
+                    evt.stopPropagation();
+                    evt.preventDefault();
+                    lineHandleDragRef.current = { lineId: el.id, handle: 'start' };
+                    setActiveLineHandleDrag(el.id);
+                  }}
+                  onTouchStart={(evt) => evt.stopPropagation()}
+                />
+                <circle
+                  cx={s.x}
+                  cy={s.y}
+                  r={5}
+                  className="line-handle-circle"
+                  style={{ pointerEvents: 'none' }}
+                />
+
+                {/* MIDDLE (VERTEX / CURVE BEND) */}
+                <circle
+                  cx={vertex.x}
+                  cy={vertex.y}
+                  r={22}
+                  fill="transparent"
+                  style={{ pointerEvents: 'auto', cursor: 'grab', touchAction: 'none' }}
+                  onMouseDown={(evt) => {
+                    evt.stopPropagation();
+                    lineHandleDragRef.current = { lineId: el.id, handle: 'middle' };
+                    setActiveLineHandleDrag(el.id);
+                  }}
+                  onPointerDown={(evt) => {
+                    evt.stopPropagation();
+                    evt.preventDefault();
+                    lineHandleDragRef.current = { lineId: el.id, handle: 'middle' };
+                    setActiveLineHandleDrag(el.id);
+                  }}
+                  onTouchStart={(evt) => evt.stopPropagation()}
                 />
                 <circle
                   cx={vertex.x}
                   cy={vertex.y}
                   r={5}
                   className="line-handle-circle"
-                  style={{ pointerEvents: 'auto' }}
+                  style={{ pointerEvents: 'none' }}
+                />
+
+                {/* END ENDPOINT */}
+                <circle
+                  cx={e.x}
+                  cy={e.y}
+                  r={22}
+                  fill="transparent"
+                  style={{ pointerEvents: 'auto', cursor: 'grab', touchAction: 'none' }}
                   onMouseDown={(evt) => {
                     evt.stopPropagation();
-                    lineHandleDragRef.current = { lineId: el.id, handle: 'middle' };
+                    lineHandleDragRef.current = { lineId: el.id, handle: 'end' };
                     setActiveLineHandleDrag(el.id);
                   }}
+                  onPointerDown={(evt) => {
+                    evt.stopPropagation();
+                    evt.preventDefault();
+                    lineHandleDragRef.current = { lineId: el.id, handle: 'end' };
+                    setActiveLineHandleDrag(el.id);
+                  }}
+                  onTouchStart={(evt) => evt.stopPropagation()}
                 />
                 <circle
                   cx={e.x}
                   cy={e.y}
                   r={5}
                   className="line-handle-circle"
-                  style={{ pointerEvents: 'auto' }}
-                  onMouseDown={(evt) => {
-                    evt.stopPropagation();
-                    lineHandleDragRef.current = { lineId: el.id, handle: 'end' };
-                    setActiveLineHandleDrag(el.id);
-                  }}
+                  style={{ pointerEvents: 'none' }}
                 />
               </g>
             );
@@ -4189,6 +5542,14 @@ export const Canvas: React.FC<CanvasProps> = ({
                   setActiveLineHandleDrag(el.id);
                 }
               }}
+              onPointerDown={(evt) => {
+                evt.stopPropagation();
+                if (!isEditing) {
+                  lineHandleDragRef.current = { lineId: el.id, handle: 'middle' };
+                  setActiveLineHandleDrag(el.id);
+                }
+              }}
+              onTouchStart={(evt) => evt.stopPropagation()}
               onDoubleClick={(evt) => {
                 evt.stopPropagation();
                 setEditingLineLabelId(el.id);
@@ -4236,6 +5597,7 @@ export const Canvas: React.FC<CanvasProps> = ({
       {scrollbarMetrics.showH && (
         <div
           className="canvas-scrollbar-h"
+          onPointerDown={(e) => e.stopPropagation()}
           onMouseDown={(e) => handleScrollbarMouseDown('h', e)}
         >
           <div
@@ -4251,6 +5613,7 @@ export const Canvas: React.FC<CanvasProps> = ({
       {scrollbarMetrics.showV && (
         <div
           className="canvas-scrollbar-v"
+          onPointerDown={(e) => e.stopPropagation()}
           onMouseDown={(e) => handleScrollbarMouseDown('v', e)}
         >
           <div
@@ -4263,6 +5626,14 @@ export const Canvas: React.FC<CanvasProps> = ({
           />
         </div>
       )}
+
+      {/* FLOATING ZOOM LEVEL OSD PILL */}
+      <div
+        className={`canvas-zoom-osd ${zoomOsd.visible ? 'visible' : ''}`}
+        aria-live="polite"
+      >
+        <span className="canvas-zoom-osd-val">{Math.round(zoomOsd.scale * 100)}%</span>
+      </div>
 
       <UnsortedDrawer
         isOpen={Boolean(isUnsortedDrawerOpen)}
@@ -4309,111 +5680,6 @@ export const Canvas: React.FC<CanvasProps> = ({
         </div>
       )}
 
-      {/* FLOATING TOUCH SELECTION ACTION BAR (TOUCH SHORTCUTS ALTERNATIVE - TASK 2.10) */}
-      {(selectedElementId || selectedIds.length > 0) && (
-        <div className="touch-selection-action-bar" onClick={(e) => e.stopPropagation()}>
-          <div className="selection-count-badge">
-            {selectedIds.length > 1 ? `${selectedIds.length} items` : '1 item'}
-          </div>
-
-          <button
-            className={`touch-action-btn ${isTouchMultiSelectMode ? 'active' : ''}`}
-            onClick={() => setIsTouchMultiSelectMode(!isTouchMultiSelectMode)}
-            title="Multi-select mode (tap cards to add/remove)"
-          >
-            <CheckSquare size={17} />
-            <span>Select</span>
-          </button>
-
-          {onDuplicateElement && (
-            <button
-              className="touch-action-btn"
-              onClick={() => onDuplicateElement(selectedElementId || undefined)}
-              title="Duplicate"
-            >
-              <CopyPlus size={17} />
-              <span>Duplicate</span>
-            </button>
-          )}
-
-          {onCopyElement && (
-            <button
-              className="touch-action-btn"
-              onClick={() => onCopyElement()}
-              title="Copy"
-            >
-              <Copy size={17} />
-              <span>Copy</span>
-            </button>
-          )}
-
-          {onToggleLockElement && (
-            <button
-              className="touch-action-btn"
-              onClick={() => onToggleLockElement(selectedElementId || undefined)}
-              title="Lock/Unlock position"
-            >
-              <Lock size={17} />
-              <span>Lock</span>
-            </button>
-          )}
-
-          {onRecolorElement && (
-            <div style={{ position: 'relative' }}>
-              <button
-                className={`touch-action-btn ${showTouchColorPalette ? 'active' : ''}`}
-                onClick={() => setShowTouchColorPalette(!showTouchColorPalette)}
-                title="Change card color"
-              >
-                <Palette size={17} />
-                <span>Color</span>
-              </button>
-              {showTouchColorPalette && (
-                <div className="touch-color-palette-popover">
-                  {(Object.keys(CARD_COLORS) as CardColorTint[]).map((tint) => (
-                    <div
-                      key={tint}
-                      className="touch-color-swatch"
-                      style={{ backgroundColor: CARD_COLORS[tint].bg, borderColor: CARD_COLORS[tint].border }}
-                      onClick={() => {
-                        onRecolorElement(tint);
-                        setShowTouchColorPalette(false);
-                      }}
-                      title={CARD_COLORS[tint].name}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          <button
-            className="touch-action-btn danger"
-            onClick={() => {
-              if (selectedElementId) {
-                onDeleteElement(selectedElementId);
-              }
-            }}
-            title="Delete / Move to Trash"
-          >
-            <Trash2 size={17} />
-            <span>Delete</span>
-          </button>
-
-          <button
-            className="touch-action-btn close-btn"
-            onClick={() => {
-              onSelectElement(null);
-              if (onMultiSelect) onMultiSelect([]);
-              setIsTouchMultiSelectMode(false);
-              setShowTouchColorPalette(false);
-            }}
-            title="Deselect all"
-          >
-            <X size={16} />
-          </button>
-        </div>
-      )}
     </div>
   );
 };

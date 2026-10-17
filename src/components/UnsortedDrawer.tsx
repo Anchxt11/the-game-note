@@ -40,7 +40,7 @@ export const UnsortedDrawer: React.FC<UnsortedDrawerProps> = ({
 
   if (!isOpen) return null;
 
-  const handleMouseDown = (e: React.MouseEvent, el: Element) => {
+  const handleMouseDown = (e: React.MouseEvent | React.PointerEvent, el: Element) => {
     e.stopPropagation();
     const target = e.target as HTMLElement;
     if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable || Boolean(target.closest('[contenteditable="true"]'))) {
@@ -50,7 +50,7 @@ export const UnsortedDrawer: React.FC<UnsortedDrawerProps> = ({
       return;
     }
 
-    if (e.shiftKey && onMultiSelect) {
+    if ((e as React.MouseEvent).shiftKey && onMultiSelect) {
       if (selectedIds.includes(el.id)) {
         onMultiSelect(selectedIds.filter(id => id !== el.id));
       } else {
@@ -61,33 +61,64 @@ export const UnsortedDrawer: React.FC<UnsortedDrawerProps> = ({
       if (onMultiSelect) onMultiSelect([el.id]);
     }
 
+    const pt = (e as any).touches?.[0] || e;
+    const startX = pt.clientX;
+    const startY = pt.clientY;
+    let isLifted = false;
+
     setDraggedEl({
       element: el,
-      startX: e.clientX,
-      startY: e.clientY,
-      currentX: e.clientX,
-      currentY: e.clientY,
+      startX,
+      startY,
+      currentX: startX,
+      currentY: startY,
     });
 
-    const handleMouseMove = (moveEvent: MouseEvent) => {
-      setDraggedEl(prev => prev ? { ...prev, currentX: moveEvent.clientX, currentY: moveEvent.clientY } : null);
+    const isOverCanvas = (clientX: number, clientY: number) => {
+      if (!containerRef.current) return false;
+      const rect = containerRef.current.getBoundingClientRect();
+      const isPhone = window.innerWidth <= 640;
+      if (isPhone) {
+        // On phone bottom sheet, canvas is above the drawer top
+        return clientY < rect.top;
+      } else {
+        // On desktop right drawer, canvas is to the left of the drawer
+        return clientX < rect.left;
+      }
+    };
 
-      const dx = moveEvent.clientX - e.clientX;
-      const dy = moveEvent.clientY - e.clientY;
-      if (Math.sqrt(dx * dx + dy * dy) > 15) {
-        if (containerRef.current && moveEvent.clientX >= containerRef.current.getBoundingClientRect().left) {
+    const handlePointerMove = (moveEvt: any) => {
+      const curPt = moveEvt.touches?.[0] || moveEvt;
+      const currentX = curPt.clientX;
+      const currentY = curPt.clientY;
+
+      const dx = currentX - startX;
+      const dy = currentY - startY;
+      const dist = Math.hypot(dx, dy);
+
+      if (!isLifted && (dist > 10 || dy < -8)) {
+        isLifted = true;
+      }
+
+      if (isLifted) {
+        if (moveEvt.cancelable) {
+          moveEvt.preventDefault();
+        }
+        setDraggedEl(prev => prev ? { ...prev, currentX, currentY } : null);
+
+        if (!isOverCanvas(currentX, currentY)) {
           const cards = document.querySelectorAll('.unsorted-item-card-wrap');
           let foundTargetId: string | null = null;
           let foundIdx: number | null = null;
 
           cards.forEach((domEl, idx) => {
             const rect = domEl.getBoundingClientRect();
-            if (moveEvent.clientY >= rect.top && moveEvent.clientY <= rect.bottom) {
+            if (currentY >= rect.top && currentY <= rect.bottom) {
               const id = domEl.getAttribute('data-id');
               if (id && id !== el.id) {
                 foundTargetId = id;
                 const mid = rect.top + rect.height / 2;
-                foundIdx = moveEvent.clientY < mid ? idx : idx + 1;
+                foundIdx = currentY < mid ? idx : idx + 1;
               }
             }
           });
@@ -102,17 +133,27 @@ export const UnsortedDrawer: React.FC<UnsortedDrawerProps> = ({
       }
     };
 
-    const handleMouseUp = (upEvent: MouseEvent) => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
+    const handlePointerUp = (upEvt: any) => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', handlePointerUp);
+      window.removeEventListener('pointercancel', handlePointerUp);
+      window.removeEventListener('touchmove', handlePointerMove);
+      window.removeEventListener('touchend', handlePointerUp);
+      window.removeEventListener('touchcancel', handlePointerUp);
+      window.removeEventListener('mousemove', handlePointerMove);
+      window.removeEventListener('mouseup', handlePointerUp);
 
-      const dx = upEvent.clientX - e.clientX;
-      const dy = upEvent.clientY - e.clientY;
-      const distance = Math.sqrt(dx * dx + dy * dy);
+      const upPt = upEvt.changedTouches?.[0] || upEvt;
+      const dx = upPt.clientX - startX;
+      const dy = upPt.clientY - startY;
+      const distance = Math.hypot(dx, dy);
 
-      if (distance > 15) {
-        if (containerRef.current && upEvent.clientX < containerRef.current.getBoundingClientRect().left) {
-          onMoveToCanvas(el, upEvent.clientX, upEvent.clientY);
+      if (isLifted || distance > 14) {
+        if (isOverCanvas(upPt.clientX, upPt.clientY)) {
+          if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+            try { navigator.vibrate(30); } catch (_) {}
+          }
+          onMoveToCanvas(el, upPt.clientX, upPt.clientY);
         } else if (dragTargetIdRef.current) {
           onReorder(el.id, dragTargetIdRef.current);
         }
@@ -123,8 +164,14 @@ export const UnsortedDrawer: React.FC<UnsortedDrawerProps> = ({
       setDropInsertIndex(null);
     };
 
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', handlePointerUp);
+    window.addEventListener('pointercancel', handlePointerUp);
+    window.addEventListener('touchmove', handlePointerMove, { passive: false });
+    window.addEventListener('touchend', handlePointerUp);
+    window.addEventListener('touchcancel', handlePointerUp);
+    window.addEventListener('mousemove', handlePointerMove);
+    window.addEventListener('mouseup', handlePointerUp);
   };
 
   // Marquee rubber band selection inside drawer
@@ -206,12 +253,6 @@ export const UnsortedDrawer: React.FC<UnsortedDrawerProps> = ({
         </div>
       )}
 
-      {/* Mobile Backdrop for bottom sheet mode */}
-      <div
-        className="mobile-unsorted-backdrop"
-        onClick={onClose}
-      />
-
       <aside
         ref={containerRef}
         className="unsorted-drawer"
@@ -258,7 +299,7 @@ export const UnsortedDrawer: React.FC<UnsortedDrawerProps> = ({
             background: 'rgb(38, 38, 38)',
           }}
         >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div className="unsorted-header-left" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <button
               className="drawer-mobile-back-btn"
               onClick={onClose}
@@ -267,7 +308,7 @@ export const UnsortedDrawer: React.FC<UnsortedDrawerProps> = ({
               <ArrowLeft size={18} />
             </button>
             <Folder className="drawer-header-folder-icon" size={18} color="#aaa" />
-            <span style={{ color: '#fff', fontSize: '15px', fontWeight: 700, fontFamily: 'Outfit, sans-serif' }}>
+            <span className="unsorted-header-title" style={{ color: '#fff', fontSize: '15px', fontWeight: 700, fontFamily: 'Outfit, sans-serif' }}>
               Unsorted {unsortedElements.length > 0 ? `(${unsortedElements.length})` : ''}
             </span>
           </div>

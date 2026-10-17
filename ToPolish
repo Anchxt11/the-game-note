@@ -1,0 +1,45 @@
+Android
+	Tapping with 2 fingers brings a menu to paste, undo and select all DONE
+	Right click menu not functional from 3 dots is not working DONE
+	CLicking on the canvas does the not reset the bottom bar to the main default bar. DONE
+	Color Functionalist is not working as it works in the desktop version DONE
+
+
+	Text formatting bottom bar should appear above the keyboard DONE
+	Remove the leftover hold on the screen to open the right click menu functinoality DONE
+	Unsorted Column should open like this in phones DONE
+	Padding under the status bar with the same colour as the bottom bar DONE
+
+	Unsorted Column lost functionality in android phone DONE
+	Drag and drop functionality when adding an element DONE
+
+	Line bar fucntionality DONE
+	Table bar functionality DONE
+	To DO list date functionality DONE
+
+	Line Colour cant be changed in phone DONE
+	Board Name Bar on top DONE
+	
+Tablet
+	Top navigation bar padding
+	
+Linux
+	
+	Shift/Ctrl Selecting multiple times DONE
+	Removing the random blue bar at the bottom DONE
+	Removing the delay in movement of element and pointer DONE
+	Smooth animated movement. DONE
+	GRID FIX -- NP
+	ANTIALIASING -- NP
+	
+Common
+	text formatting skipping to the front DONE
+	Instead of objects zooming out into the left corner when zoomed out fully, they should zoom out in the middle. DONE
+	Any element resizing animation not DONE
+	Element connected to an arrow dragging DONE
+	
+	Zooming in and out on android tablet and phone is still a bit fiddly DONE
+	Drag to select rectangle is missing on both phone and tablet DONE
+	Object resizing not available in both	DONE
+	Image uploading in both DONE
+	NO CANVAS BOUNDING and All content should stay in screen when zoomed out DONE

@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "android:build": "tauri android build --debug --apk --target aarch64",
+    "android:install": "adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.3",

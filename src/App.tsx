@@ -16,7 +16,7 @@ import { Canvas } from './components/Canvas';
 import { ContextMenu } from './components/ContextMenu';
 import { SearchModal } from './components/SearchModal';
 import { MobileBottomBar } from './components/MobileBottomBar';
-import { isPhoneScreen, isTouchPrimary } from './utils/platform';
+import { isPhoneScreen, isTouchPrimary, isTablet, isAndroidTablet, getDeviceCategory } from './utils/platform';
 import { ipcService } from './services/ipc';
 import { 
   Search as SearchIcon, 
@@ -29,6 +29,8 @@ import {
   Folder,
   Users,
   ChevronDown,
+  ChevronLeft,
+  UserPlus,
   Minimize2,
   ArrowLeft
 } from 'lucide-react';
@@ -56,6 +58,12 @@ export const App: React.FC = () => {
 
   // Context Menu and Clipboard state
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; canvasX?: number; canvasY?: number; element: Element | null; tableSubTarget?: TableSubTarget } | null>(null);
+  const [, setWindowResizeTrigger] = useState(0);
+  useEffect(() => {
+    const handleResize = () => setWindowResizeTrigger((v) => v + 1);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
   const [clipboardElements, setClipboardElements] = useState<Element[]>(() => {
     try {
       const stored = localStorage.getItem('milanote_clipboard');
@@ -84,6 +92,25 @@ export const App: React.FC = () => {
     localStorage.setItem('milanote_board_history', JSON.stringify(boardHistory));
   }, [boardHistory]);
 
+  useEffect(() => {
+    const updateDeviceClasses = () => {
+      const cat = getDeviceCategory();
+      if (cat === 'tablet') {
+        document.body.classList.add('device-tablet');
+        document.body.classList.remove('device-phone');
+      } else if (cat === 'phone') {
+        document.body.classList.add('device-phone');
+        document.body.classList.remove('device-tablet');
+      } else {
+        document.body.classList.remove('device-phone');
+        document.body.classList.remove('device-tablet');
+      }
+    };
+    updateDeviceClasses();
+    window.addEventListener('resize', updateDeviceClasses);
+    return () => window.removeEventListener('resize', updateDeviceClasses);
+  }, []);
+
   const [showViewMenu, setShowViewMenu] = useState<boolean>(false);
   const [isPresentationMode, setIsPresentationMode] = useState<boolean>(false);
   const [dragHoverBoardId, setDragHoverBoardId] = useState<string | null>(null);
@@ -93,6 +120,7 @@ export const App: React.FC = () => {
   const handleCanvasClick = useCallback(() => {
     setResetMobileBarTrigger((prev) => prev + 1);
     setTwoFingerMenu(null);
+    setIsUnsortedDrawerOpen(false);
   }, []);
 
   const recordHistory = useCallback((currentState: Element[]) => {
@@ -456,6 +484,18 @@ export const App: React.FC = () => {
     }
   }, [elements, recordHistory, canvasScale]);
 
+  const handleMoveUnsortedElementToCanvasCenter = useCallback((element: Element) => {
+    const vp = document.querySelector('.canvas-viewport') as HTMLElement | null;
+    let clientX = window.innerWidth / 2;
+    let clientY = window.innerHeight / 2;
+    if (vp) {
+      const rect = vp.getBoundingClientRect();
+      clientX = rect.left + rect.width / 2;
+      clientY = rect.top + rect.height / 2;
+    }
+    handleMoveFromUnsortedToCanvas(element, clientX, clientY);
+  }, [handleMoveFromUnsortedToCanvas]);
+
   const handleBreadcrumbClick = (index: number) => {
     const nextHistory = boardHistory.slice(0, index + 1);
     const target = nextHistory[nextHistory.length - 1];
@@ -508,9 +548,47 @@ export const App: React.FC = () => {
     }
   };
 
+  const handleScaleToFit = useCallback(() => {
+    const activeEls = elements.filter(
+      (el) => !el.style?.is_unsorted && !el.style?.parent_column_id && el.element_type !== 'line'
+    );
+    if (activeEls.length === 0) {
+      setCanvasScale(1.0);
+      return;
+    }
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    activeEls.forEach((el) => {
+      const w = el.width || (el.element_type === 'nested_board' ? 80 : 340);
+      const h = el.height || (el.element_type === 'nested_board' ? 100 : 60);
+      if (el.x < minX) minX = el.x;
+      if (el.x + w > maxX) maxX = el.x + w;
+      if (el.y < minY) minY = el.y;
+      if (el.y + h > maxY) maxY = el.y + h;
+    });
+
+    const contentW = maxX - minX;
+    const contentH = maxY - minY;
+    const vp = document.querySelector('.canvas-viewport') as HTMLElement | null;
+    const vpW = vp ? vp.clientWidth : window.innerWidth;
+    const vpH = vp ? vp.clientHeight : window.innerHeight;
+
+    const availW = Math.max(100, vpW - 140);
+    const availH = Math.max(100, vpH - 140);
+
+    const fitScaleX = availW / Math.max(contentW, 100);
+    const fitScaleY = availH / Math.max(contentH, 100);
+    const targetScale = Math.min(1.0, Math.max(0.15, Number(Math.min(fitScaleX, fitScaleY).toFixed(2))));
+
+    setCanvasScale(targetScale);
+  }, [elements]);
+
   const handleRecolor = async (tintOrColor: CardColorTint | string, targetId?: string) => {
     const el = contextMenu?.element || elements.find(item => item.id === (targetId || selectedElementId)) || null;
     if (!el) return;
+    if (el.element_type === 'line') {
+      handleStyleChange(el.id, { ...(el.style || {}), line_color: tintOrColor });
+      return;
+    }
     const isHexOrColor = tintOrColor.startsWith('#') || tintOrColor === 'transparent' || tintOrColor.startsWith('rgb');
     const newStyle = isHexOrColor
       ? { ...(el.style || {}), background_color: tintOrColor === 'transparent' ? undefined : tintOrColor }
@@ -711,7 +789,7 @@ export const App: React.FC = () => {
       const draggedUrl = (window as any).__MILANOTE_DRAGGED_IMAGE_URL__;
       const draggedCaption = (window as any).__MILANOTE_DRAGGED_IMAGE_CAPTION__;
       initialContent = { 
-        url: draggedUrl || 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=800&q=80', 
+        url: draggedUrl || '', 
         caption: draggedCaption || '' 
       };
       (window as any).__MILANOTE_DRAGGED_IMAGE_URL__ = undefined;
@@ -777,6 +855,7 @@ export const App: React.FC = () => {
     if (destBoardId === currentBoardId) {
       setElements((prev) => [...prev, newEl]);
       setSelectedElementId(newEl.id);
+      setSelectedIds([newEl.id]);
 
       if (tool === 'note' || tool === 'heading' || tool === 'link' || tool === 'task_list') {
         setEditingElementId(newEl.id);
@@ -806,9 +885,32 @@ export const App: React.FC = () => {
 
     setElements((prev) => [...prev, newEl]);
     setSelectedElementId(newEl.id);
+    setSelectedIds([newEl.id]);
   };
 
   const handleDropToolAtScreen = (tool: ToolType, clientX: number, clientY: number) => {
+    // Check if dropped onto Unsorted Drawer or floating pill
+    const unsortedDrawerEl = document.querySelector('.unsorted-drawer');
+    const unsortedPillEl = document.querySelector('.mobile-unsorted-floating-pill');
+    let isOverUnsorted = false;
+    if (unsortedDrawerEl) {
+      const uRect = unsortedDrawerEl.getBoundingClientRect();
+      if (clientX >= uRect.left && clientX <= uRect.right && clientY >= uRect.top && clientY <= uRect.bottom) {
+        isOverUnsorted = true;
+      }
+    }
+    if (unsortedPillEl) {
+      const pRect = unsortedPillEl.getBoundingClientRect();
+      if (clientX >= pRect.left && clientX <= pRect.right && clientY >= pRect.top && clientY <= pRect.bottom) {
+        isOverUnsorted = true;
+      }
+    }
+
+    if (isOverUnsorted) {
+      handleDropTool(tool, 100, 100, undefined, true);
+      return;
+    }
+
     const vp = document.querySelector('.canvas-viewport') as HTMLElement | null;
     let targetX = 100;
     let targetY = 100;
@@ -851,17 +953,28 @@ export const App: React.FC = () => {
       }
     }
 
-    const offset = tool === 'nested_board' ? 40 : 20;
-    handleDropTool(tool, Math.round(targetX - offset), Math.round(targetY - offset), targetColumnId, false, targetBoardId);
+    let offsetX = 100;
+    let offsetY = 30;
+    if (tool === 'nested_board') {
+      offsetX = 50;
+      offsetY = 50;
+    } else if (tool === 'column') {
+      offsetX = 120;
+      offsetY = 40;
+    }
+
+    handleDropTool(tool, Math.round(targetX - offsetX), Math.round(targetY - offsetY), targetColumnId, false, targetBoardId);
   };
 
-  const handleCreateQuickLine = async (sourceElId: string): Promise<string | undefined> => {
+  const handleCreateQuickLine = async (sourceElId: string): Promise<string> => {
     recordHistory(elements);
     const sourceEl = elements.find(el => el.id === sourceElId);
     const startX = sourceEl ? sourceEl.x + (sourceEl.width || 340) / 2 : 0;
     const startY = sourceEl ? sourceEl.y + (sourceEl.height || 60) / 2 : 0;
+    const newId = crypto.randomUUID();
 
-    const newEl = await ipcService.createElement({
+    const newEl: Element = {
+      id: newId,
       board_id: currentBoardId,
       element_type: 'line',
       x: startX,
@@ -872,8 +985,8 @@ export const App: React.FC = () => {
       content: {
         start_x: 0,
         start_y: 0,
-        end_x: 50,
-        end_y: 0,
+        end_x: 60,
+        end_y: 60,
         control_offset_x: 0,
         control_offset_y: 0,
         start_target_id: sourceElId,
@@ -892,11 +1005,30 @@ export const App: React.FC = () => {
         is_dashed: false,
         line_weight: 2
       },
-    });
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
 
     setElements((prev) => [...prev, newEl]);
-    return newEl.id;
+    setSelectedElementId(newId);
+    setSelectedIds([newId]);
+    ipcService.createElement(newEl).catch(console.error);
+    return newId;
   };
+
+  const handleUploadImageForElement = useCallback((elementId: string, dataUrl: string) => {
+    recordHistory(elements);
+    const img = new Image();
+    img.onload = () => {
+      const aspect = (img.naturalWidth && img.naturalHeight) ? (img.naturalWidth / img.naturalHeight) : (340 / 220);
+      const currentEl = elements.find(x => x.id === elementId);
+      const cardW = currentEl?.width || 340;
+      const cardH = Math.max(80, Math.round(cardW / aspect));
+      handleContentChange(elementId, { ...(currentEl?.content || {}), url: dataUrl });
+      handleUpdateElementPositions([{ id: elementId, x: currentEl?.x || 100, y: currentEl?.y || 100, width: cardW, height: cardH, z_index: currentEl?.z_index || 10 }]);
+    };
+    img.src = dataUrl;
+  }, [elements, handleContentChange, handleUpdateElementPositions, recordHistory]);
 
   const handleAddImageFromDrawer = async (url: string, caption: string = '') => {
     recordHistory(elements);
@@ -913,6 +1045,7 @@ export const App: React.FC = () => {
     });
     setElements((prev) => [...prev, newEl]);
     setSelectedElementId(newEl.id);
+    setSelectedIds([newEl.id]);
   };
 
   const handleAddCommentPinToElement = async (targetId: string) => {
@@ -921,6 +1054,7 @@ export const App: React.FC = () => {
     const existingPin = elements.find((x) => x.element_type === 'comment' && Boolean(x.content?.is_pinned) && x.content?.pin_target_id === targetId);
     if (existingPin) {
       setSelectedElementId(existingPin.id);
+      setSelectedIds([existingPin.id]);
       return;
     }
     recordHistory(elements);
@@ -947,6 +1081,7 @@ export const App: React.FC = () => {
 
     setElements((prev) => [...prev, newEl]);
     setSelectedElementId(newEl.id);
+    setSelectedIds([newEl.id]);
   };
 
   const handleToggleLinkCaption = (linkId: string) => {
@@ -1008,8 +1143,10 @@ export const App: React.FC = () => {
 
   return (
     <div className={`milanote-app-container ${isPresentationMode ? 'presentation-mode' : ''}`} onClick={() => setShowViewMenu(false)}>
-      {/* Top Status Bar Padding Band for Mobile (Image 1) */}
-      <div className="mobile-status-bar-filler" />
+      {/* Top Status Bar Padding Band for Mobile on Root Board (Image 1) */}
+      {currentBoardId === 'root-board' && getDeviceCategory() === 'phone' && <div className="mobile-status-bar-filler" />}
+      {/* Top Status Bar Padding Band for Tablet under Android Status Bar */}
+      {getDeviceCategory() === 'tablet' && <div className="tablet-status-bar-filler" />}
       {isPresentationMode ? (
         <button className="exit-presentation-btn" onClick={() => setIsPresentationMode(false)} title="Exit Presentation Mode (Press Esc)">
           <Minimize2 size={16} /> Exit Presentation
@@ -1200,6 +1337,8 @@ export const App: React.FC = () => {
                 document.execCommand('justifyLeft', false, undefined);
               } else if (format === 'align-center' || format === 'align') {
                 document.execCommand('justifyCenter', false, undefined);
+              } else if (format === 'align-right') {
+                document.execCommand('justifyRight', false, undefined);
               } else if (format === 'heading' || format === 'small' || format === 'callout' || format === 'code-block' || format === 'quote') {
                 const editor = document.querySelector(`#milanote-el-${activeEditingElement?.id} .note-rich-editor`) as HTMLElement | null;
                 if (editor) {
@@ -1223,30 +1362,10 @@ export const App: React.FC = () => {
                       newSel.addRange(newRange);
                     }
                   } else {
-                    const sel = window.getSelection();
-                    
-                    if (sel) {
-                      const range = document.createRange();
-                      range.selectNodeContents(editor);
-                      sel.removeAllRanges();
-                      sel.addRange(range);
+                    if (document.activeElement !== editor && !editor.contains(document.activeElement)) {
+                      editor.focus();
                     }
-                    
-                    document.execCommand('formatBlock', false, blockTag);
-                    
-                    if (sel) {
-                        try {
-                            // Safely put cursor at the end of the newly formatted block
-                            const targetBlock = editor.firstElementChild || editor;
-                            const range = document.createRange();
-                            range.selectNodeContents(targetBlock);
-                            range.collapse(false); // collapse to end
-                            sel.removeAllRanges();
-                            sel.addRange(range);
-                        } catch(e) {
-                            sel.collapseToEnd();
-                        }
-                    }
+                    document.execCommand('formatBlock', false, `<${blockTag.toLowerCase()}>`);
                   }
                 }
               } else if (format === 'color' && param) {
@@ -1380,6 +1499,17 @@ export const App: React.FC = () => {
             onStyleChange={handleStyleChange}
             onAddCommentPin={handleAddCommentPinToElement}
             onToggleCaption={handleToggleImageCaption}
+            onUploadImage={(file) => {
+              if (activeSelectedImage) {
+                const reader = new FileReader();
+                reader.onload = () => {
+                  if (typeof reader.result === 'string') {
+                    handleUploadImageForElement(activeSelectedImage.id, reader.result);
+                  }
+                };
+                reader.readAsDataURL(file);
+              }
+            }}
           />
         ) : activeSelectedLine ? (
           <LineActionSidebar
@@ -1441,6 +1571,7 @@ export const App: React.FC = () => {
           onSelectTableCells={setSelectedTableCells}
           onSelectElement={(id) => {
             setSelectedElementId(id);
+            setSelectedIds(id ? [id] : []);
             if (id !== renamingLinkId) setRenamingLinkId(null);
             if (id && editingElementId !== id) {
               setEditingElementId(null);
@@ -1453,6 +1584,7 @@ export const App: React.FC = () => {
           }}
           onMultiSelect={(ids) => {
             setSelectedIds(ids);
+            setSelectedElementId(ids.length > 0 ? ids[ids.length - 1] : null);
             if (ids.length > 0 && editingElementId) {
               setEditingElementId(null);
             }
@@ -1463,7 +1595,7 @@ export const App: React.FC = () => {
           onContentChange={handleContentChange}
           onStyleChange={handleStyleChange}
           onContextMenu={(e, element, canvasPos, tableSubTarget) => {
-            if (isPhoneScreen() || isTouchPrimary()) return;
+            if (getDeviceCategory() === 'phone') return;
             setContextMenu({ x: e.clientX, y: e.clientY, canvasX: canvasPos?.x, canvasY: canvasPos?.y, element, tableSubTarget });
           }}
           onOpenBoard={handleOpenBoard}
@@ -1485,7 +1617,30 @@ export const App: React.FC = () => {
           scale={canvasScale}
           onSetScale={setCanvasScale}
           onCanvasClick={handleCanvasClick}
-          onTwoFingerTap={(cx, cy) => setTwoFingerMenu({ canvasX: cx, canvasY: cy })}
+          onTwoFingerTap={(cx, cy, clientX, clientY, targetEl) => {
+            if (getDeviceCategory() === 'phone') {
+              setTwoFingerMenu({ canvasX: cx, canvasY: cy });
+            } else {
+              const activeEl = targetEl || (selectedElementId ? elements.find(x => x.id === selectedElementId) : null) || null;
+              if (activeEl) {
+                setSelectedElementId(activeEl.id);
+                if (!selectedIds.includes(activeEl.id)) {
+                  setSelectedIds([activeEl.id]);
+                }
+              }
+              const menuX = clientX !== undefined ? Math.min(clientX, window.innerWidth - 260) : Math.round(window.innerWidth / 2 - 130);
+              const menuY = clientY !== undefined ? Math.min(clientY, window.innerHeight - 380) : Math.round(window.innerHeight / 2 - 200);
+              setContextMenu({
+                x: Math.max(10, menuX),
+                y: Math.max(10, menuY),
+                canvasX: cx,
+                canvasY: cy,
+                element: activeEl,
+                tableSubTarget: undefined,
+              });
+            }
+          }}
+          onUploadImageForElement={handleUploadImageForElement}
         />
 
               {/* FLOATING TOP-RIGHT UNSORTED PILL BUTTON */}
@@ -1512,15 +1667,15 @@ export const App: React.FC = () => {
             <p className="view-popover-sub">Tip: hold ctrl and use mouse wheel to zoom</p>
             
             <div className="zoom-slider-row">
-              <button className="zoom-popover-icon-btn" onClick={() => setCanvasScale(s => Math.max(0.25, Number((s - 0.15).toFixed(2))))} title="Zoom Out">–</button>
+              <button className="zoom-popover-icon-btn" onClick={() => setCanvasScale(s => Math.max(0.15, Number((s - 0.15).toFixed(2))))} title="Zoom Out">–</button>
               <div className="zoom-slider-track">
-                <div className="zoom-slider-fill" style={{ width: `${Math.min(100, Math.max(0, ((canvasScale - 0.25) / (3 - 0.25)) * 100))}%` }} />
+                <div className="zoom-slider-fill" style={{ width: `${Math.min(100, Math.max(0, ((canvasScale - 0.15) / (3 - 0.15)) * 100))}%` }} />
               </div>
               <span className="zoom-percentage-badge" onClick={() => setCanvasScale(1.0)} title="Click to reset to 100%">{Math.round(canvasScale * 100)}%</span>
               <button className="zoom-popover-icon-btn" onClick={() => setCanvasScale(s => Math.min(3.0, Number((s + 0.15).toFixed(2))))} title="Zoom In">+</button>
             </div>
 
-            <button className="zoom-scale-to-fit-btn" onClick={() => setCanvasScale(1.0)}>
+            <button className="zoom-scale-to-fit-btn" onClick={handleScaleToFit}>
               Scale to fit
             </button>
           </div>
@@ -1582,16 +1737,63 @@ export const App: React.FC = () => {
         }}
       />
 
-      {/* Floating Mobile Top Back Button (Shown when inside sub-board on mobile) */}
+      {/* NATIVE MILANOTE MOBILE BOARD TOP BAR (IMAGE 2) */}
       {currentBoardId !== 'root-board' && (
-        <button
-          className="mobile-floating-back-btn"
-          onClick={() => handleBreadcrumbClick(Math.max(0, boardHistory.length - 2))}
-          title="Back to parent board"
-        >
-          <ArrowLeft size={18} />
-          <span>{boardHistory[boardHistory.length - 2]?.title || 'Back'}</span>
-        </button>
+        <header className="mobile-board-topbar" onClick={(e) => e.stopPropagation()}>
+          <button
+            className="mobile-board-back-icon-btn"
+            onClick={() => handleBreadcrumbClick(Math.max(0, boardHistory.length - 2))}
+            title="Back to previous board"
+          >
+            <ChevronLeft size={26} strokeWidth={2.2} />
+          </button>
+
+          <div className="mobile-board-title-container">
+            <input
+              type="text"
+              className="mobile-board-header-title"
+              value={boardHistory[boardHistory.length - 1]?.title || 'New Board'}
+              onChange={(e) => {
+                const nextTitle = e.target.value;
+                setBoardHistory((prev) => prev.map((node, i) => i === prev.length - 1 ? { ...node, title: nextTitle } : node));
+              }}
+              onBlur={async (e) => {
+                const nextTitle = e.target.value || 'Untitled Board';
+                setBoardHistory((prev) => prev.map((node, i) => i === prev.length - 1 ? { ...node, title: nextTitle } : node));
+                if (currentBoardId !== 'root-board') {
+                  try {
+                    await ipcService.updateElementContent(currentBoardId, { title: nextTitle });
+                  } catch (err) {
+                    console.error('Failed to update board title in IPC:', err);
+                  }
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === 'Escape') {
+                  e.currentTarget.blur();
+                }
+              }}
+              title="Click to edit board title"
+            />
+          </div>
+
+          <button
+            className="mobile-board-share-btn"
+            title="Share board"
+            onClick={() => {
+              if (typeof navigator !== 'undefined' && 'share' in navigator) {
+                try {
+                  navigator.share({
+                    title: boardHistory[boardHistory.length - 1]?.title || 'Board',
+                    url: window.location.href,
+                  }).catch(() => {});
+                } catch (_) {}
+              }
+            }}
+          >
+            <UserPlus size={18} strokeWidth={2} />
+          </button>
+        </header>
       )}
 
       {/* Native Milanote Mobile Bottom Bar (Screens 1, 2, 3, 4, 5) */}
@@ -1599,8 +1801,11 @@ export const App: React.FC = () => {
         currentBoardId={currentBoardId}
         boardTitle={boardHistory[boardHistory.length - 1]?.title || 'Board'}
         unsortedCount={elements.filter(el => Boolean(el.style?.is_unsorted) && el.element_type !== 'line').length}
-        onOpenUnsorted={() => setIsUnsortedDrawerOpen(true)}
-        onOpenBoardsMenu={() => handleBreadcrumbClick(0)}
+        onOpenUnsorted={() => setIsUnsortedDrawerOpen(prev => !prev)}
+        onOpenBoardsMenu={() => {
+          setIsUnsortedDrawerOpen(false);
+          handleBreadcrumbClick(0);
+        }}
         canUndo={undoStack.length > 0}
         canRedo={redoStack.length > 0}
         onUndo={handleUndo}
@@ -1610,12 +1815,15 @@ export const App: React.FC = () => {
         onSelectTool={setActiveTool}
         onDropToolAtScreen={handleDropToolAtScreen}
         isUnsortedOpen={isUnsortedDrawerOpen}
+        onMoveElementToCanvas={handleMoveUnsortedElementToCanvasCenter}
+        onMoveElementToUnsorted={handleMoveToUnsorted}
         selectedElement={elements.find(x => x.id === selectedElementId) || null}
         selectedIds={selectedIds}
         onDeselect={() => {
           setSelectedElementId(null);
           setSelectedIds([]);
           setEditingElementId(null);
+          setSelectedTableCells(null);
         }}
         onRecolor={handleRecolor}
         onCut={handleCut}
@@ -1644,10 +1852,13 @@ export const App: React.FC = () => {
         onDoneEditing={() => setEditingElementId(null)}
         onStyleChange={handleStyleChange}
         onContentChange={handleContentChange}
+        selectedTableCells={selectedTableCells}
+        onDeselectTableCells={() => setSelectedTableCells(null)}
+        onUploadImageForElement={handleUploadImageForElement}
       />
 
-      {/* Two-Finger Tap Context Menu Sheet (Screenshot 1) */}
-      {twoFingerMenu && (
+      {/* Two-Finger Tap Context Menu Sheet (Phone only) */}
+      {twoFingerMenu && getDeviceCategory() === 'phone' && (
         <div
           className="mobile-context-sheet-backdrop"
           onClick={() => setTwoFingerMenu(null)}

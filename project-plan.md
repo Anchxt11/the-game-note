@@ -437,6 +437,58 @@ flowchart LR
      - Configured Android theme `android:statusBarColor` and `android:navigationBarColor` to `#242426`.
 - **Acceptance**: Tested and verified with `npm run build`, `cargo check`, `cargo test`, and full compilation of `app-universal-debug.apk`.
 
+### Task 3.5.12: Unsorted Drawer Shadow Removal, Full Desktop Parity & Hold-Drag-Drop
+- **Status**: ✅ Done (2026-10-15)
+- **Files**:
+  - [`src/components/UnsortedDrawer.tsx`](file:///home/anchit/gitClones/the-game-note/src/components/UnsortedDrawer.tsx)
+  - [`src/components/MobileBottomBar.tsx`](file:///home/anchit/gitClones/the-game-note/src/components/MobileBottomBar.tsx)
+  - [`src/components/Canvas.tsx`](file:///home/anchit/gitClones/the-game-note/src/components/Canvas.tsx)
+  - [`src/App.tsx`](file:///home/anchit/gitClones/the-game-note/src/App.tsx)
+  - [`src/index.css`](file:///home/anchit/gitClones/the-game-note/src/index.css)
+- **What**:
+  1. **Shadow & Backdrop Removal under Unsorted**:
+     - Removed the dimmed backdrop overlay element (`.mobile-unsorted-backdrop`) and removed all box shadows (`box-shadow: none !important;`) from `.unsorted-drawer`. The dot grid canvas above the sheet remains completely clean, crisp, and visible without any darkening or shadows, matching Image 2.
+     - Centered the "Unsorted" title in the sheet header and aligned the plain text "Close" button cleanly on the right with no back arrow or folder icon on mobile screens.
+  2. **Full Desktop Unsorted Functionality on Phone**:
+     - Upgraded touch dragging of cards inside the Unsorted drawer:
+       - Dragging upwards out of the bottom sheet (`clientY < drawerRect.top`) lifts a ghost card and drops it directly onto the canvas at that screen coordinate via `onMoveToCanvas(el, clientX, clientY)`.
+       - Dragging vertically inside the drawer triggers reordering (`onReorder(el.id, targetId)`) with active insertion line indicators.
+     - Added direct "Place on Board" / "Place" action:
+       - Selecting any card in Unsorted shows a "Place" button (`FolderPlus`) in the mobile selection bar and a "Place on Board" item in the 3-dots context sheet to instantly place the card into the center of the current canvas view.
+       - Selecting any card on the canvas includes a "Move to Unsorted" item in the 3-dots context sheet.
+     - Canvas drag-to-unsorted integration:
+       - Dragging cards across the canvas over the floating `0 Unsorted` pill, the Unsorted drawer, or the "Quick notes" tab highlights unsorted drop targets and moves the cards into Unsorted on release.
+       - Dropping new tools from the `+` shelf into the Unsorted drawer or pill immediately creates the new item inside Unsorted.
+     - Tapping the "Quick notes" tab toggles the Unsorted sheet; tapping anywhere on the canvas dismisses the Unsorted sheet and resets bottom bars to default.
+  3. **Hold, Drag and Drop from `+` Elements Bar**:
+     - Implemented a 160ms hold-to-lift timer with haptic vibration (`navigator.vibrate(35)`) and floating preview follower.
+     - Immediate lift when dragging upwards towards canvas (`dy < -8`).
+     - Preserved horizontal scrolling of the tool shelf when swiping horizontally (`|dx| > 12 && |dy| < 8`).
+     - Added `{ passive: false }` touch listeners calling `e.preventDefault()` during dragging to prevent Android Chrome from aborting with `pointercancel` or scrolling the container.
+     - Dropping onto the canvas places the new element centered at finger coordinates (`(clientX, clientY)`).
+### Task 3.5.13: Full Desktop Parity for Table, Line, and To-Do Elements in Android Bottom Bar
+- **Status**: ✅ Done (2026-10-15)
+- **Files**:
+  - [`src/components/MobileBottomBar.tsx`](file:///home/anchit/gitClones/the-game-note/src/components/MobileBottomBar.tsx)
+  - [`src/App.tsx`](file:///home/anchit/gitClones/the-game-note/src/App.tsx)
+  - [`src/index.css`](file:///home/anchit/gitClones/the-game-note/src/index.css)
+- **What**:
+  1. **Table Element Desktop Parity**:
+     - When Table element is selected (no cells): shows Title toggle (`Type`), Caption toggle (`AlignLeft`), Add Row (`+ Row`), Add Column (`+ Col`), Labels (`Tag`), Reactions (`Smile`), Comment, Color, and More (`...`).
+     - When Cell(s) are selected in Table: switches bottom bar to cell formatting options with Text style (Text Color & Highlight drawers), Cell type (Auto, Number, Currency, %, Text, Date & Time, Checkbox), Cell Tint, Alignment (Left, Center, Right, Top, Middle, Bottom), `+ Col`, `+ Row`, and Clear cell contents.
+     - Done button deselects cells back to table selection if cells are selected, or deselects table if table is selected.
+  2. **Line Element Desktop Parity**:
+     - Added full line controls to bottom selection bar: Start Arrow toggle (`ArrowLeft`), End Arrow toggle (`ArrowRight`), Text Label toggle (`Tag`), Dashed toggle (dashed SVG line), Line Weight drawer selector (Thin 2px, Medium 4px, Thick 6px), Color swatch drawer (updating `line_color`), Comment, and More (`...`).
+  3. **To-Do List Date Feature Desktop Parity**:
+     - Upgraded Due Date button to open `.mobile-date-drawer` above selection bar.
+     - Quick date shortcuts: Today (`+0d`), Tomorrow (`+1d`), Next Week (`+7d`).
+     - Native date picker input dialog (`<input type="date">`) for choosing any custom due date.
+     - "Clear Due Date" button to easily remove the scheduled due date.
+     - Active indicator badge on the Due Date button when a date is scheduled.
+  4. **Horizontal Action Row Scrolling**:
+     - Made `.mobile-selection-actions-left` horizontally scrollable with `overflow-x: auto; scrollbar-width: none; max-width: calc(100vw - 84px);` and `flex-shrink: 0;` on all action buttons, allowing smooth touch swiping with no overflow, keeping the coral `Done` button pinned on the right.
+- **Acceptance**: Tested and verified with `npm run build`, `cargo check`, and native Android APK compilation (`app-universal-debug.apk`).
+
 ---
 
 ## Phase 4: cr-sqlite Integration
@@ -692,6 +744,61 @@ All 14 commands registered in [`main.rs`](file:///home/anchit/gitClones/the-game
 | `crates/core/src/transport.rs` | 5 | WebSocket sync client |
 | `relay-server/` | 5 | Standalone WebSocket relay server |
 | `src/components/SyncStatus.tsx` | 5 | Sync indicator + settings UI |
+
+## Appendix D: Zoom & Canvas Centering Overhaul (Cross-Device)
+
+- **Fiddly Touch Zoom Fix**:
+  - Attached native non-passive touch listeners (`touchstart`, `touchmove`, `touchend`, `touchcancel`) on `containerRef.current` with `{ passive: false }` to guarantee immediate gesture capture and cancellation of inadvertent card drags.
+  - Added window capture `pointerdown` listener to register touches across elements before event propagation stops.
+  - Added `lastPinchEndTimeRef` with a 300ms cooldown window to prevent accidental card drags, clicks, or text-editing entry right after a pinch gesture ends.
+- **Canvas Stability & Element Movement**:
+  - Isolated the auto-centering `useEffect` strictly to `scale` changes (`prevScaleRef.current !== scale`), guaranteeing that moving, creating, resizing, or editing elements on the canvas never triggers a canvas shift. The canvas only moves when the user explicitly pans the canvas, drags scrollbars, or zooms.
+  - Normalized `getPanLimits` so `minPanX` and `maxPanX` remain wide and non-collapsing at normal zoom levels.
+- **Scrollbar Edge Bounding & Visual Overhaul**:
+  - Re-anchored `.canvas-scrollbar-h` and `.canvas-scrollbar-v` edge-to-edge (`left: 0; right: 0;` and `top: 0; bottom: 0;`) with modern 8px tracks and 4px rounded pill thumbs.
+  - Corrected scrollbar progress and thumb positioning to track `panLimits.maxPanX - pan.x` over `totalPanTravel`, ensuring the thumb reaches the exact edges of the screen (0% to 100%).
+  - Disabled canvas scrollbars on touch screens (`isTouchPrimary()` / `isPhoneScreen()`) where native gestures are used.
+- **Dynamic Centering without Snapping (Zero Corner-Drift)**:
+  - Replaced abrupt hard-threshold snapping with a continuous $C^1$ cubic Hermite smoothstep curve across the entire $1.0 \to 0.25$ zoom range:
+    $$t = \max\left(0, \min\left(1, \frac{1.0 - \text{scale}}{0.75}\right)\right), \quad \text{blend} = t^2 \times (3 - 2t)$$
+    $$\text{pan} = (1 - \text{blend}) \times \text{focalPan} + \text{blend} \times \text{centerPan}$$
+  - Zero derivatives at endpoints ($t=0$ and $t=1$) ensure seamless transitions between local focal zoom ($\ge 1.0$) and center zoom ($\le 0.25$) without any sudden snapping or corner drift.
+- **Smooth Zooming Out Animation**:
+  - Replaced stair-step wheel jumps with a `requestAnimationFrame` physics animation loop.
+  - Uses exponential scaling $\exp(-\Delta \times 0.002)$ to feel uniform across all zoom levels.
+  - Applies spring/lerp easing ($LERP = 0.22$) to animate scale and pan smoothly over ~120ms per wheel tick.
+  - Automatically cancels zoom animation gracefully if the user clicks, drags, touches, or pans.
+- **Drift Elimination & Closed-Form Zoom Calculations**:
+  - Replaced iterative compounding re-blends with closed-form `computeZoomPan` evaluated strictly from the start-of-gesture state (`zoomOriginRef.current`), guaranteeing zero post-zoom drift left or right.
+  - Disconnected `clampPan` from center blending so standard canvas panning and scrollbar dragging stay strictly within bounds without drifting.
+  - Filtered `useEffect([scale])` via `lastInternalScaleSetRef` so scale updates from internal animation frames never trigger conflicting post-settle pan adjustments.
+- **100% Usable Canvas In-Bounds Focal Zoom**:
+  - When zooming in ($\ge 1.0$), verified if the cursor's canvas coordinates reside within the usable canvas bounds accessible at 100% zoom level (`[minX, maxX]`, `[minY, maxY]`).
+  - If in bounds, focal zoom tracks the cursor exactly; if outside usable bounds, focal zoom smoothly clamps to the nearest accessible canvas edge rather than zooming into empty void.
+- **100% Magnetic Snap Notch**:
+  - Added a magnetic snap at 100% zoom level (`1.000`): zooming through or approaching the $[0.94, 1.06]$ window snaps cleanly onto `1.000` with subtle haptic feedback, easing smoothly into 100%. Continued scrolling breaks out cleanly.
+- **Floating Zoom OSD Pill**:
+  - Added a glassmorphism zoom percentage OSD pill at the bottom center of the canvas (`.canvas-zoom-osd`).
+  - Updates in real-time as zoom changes (wheel, pinch, or buttons) and smoothly fades out with CSS cubic-bezier transition after 1000ms of inactivity. Responsive on mobile (raised above bottom bar).
+- **Removal of Unwanted Extra Desktop Bars**:
+  - **Floating Top Back Button (`[<- Home]`)**: Removed from desktop by restricting its mounting in `src/App.tsx` strictly to `isPhoneScreen() && currentBoardId !== 'root-board'`, and removing `display: flex;` from its base CSS in `src/index.css`. Desktop keeps its clean native topbar breadcrumb trail without overlapping pills.
+  - **Touch Selection Action Bar (`[1 item] Select Duplicate ...`)**: Removed `.touch-selection-action-bar` from `src/components/Canvas.tsx` and hidden in `src/index.css`. Desktop uses its clean context menus, toolbar, and action sidebars without any unwanted floating bottom bar appearing when items are selected.
+
+## Appendix E: Native Milanote Mobile Top Bar & Unsorted Pill Realignment
+
+- **Mobile Top Bar on Opening a Board (`.mobile-board-topbar`)**:
+  - Automatically displayed when viewing a board (`currentBoardId !== 'root-board'`) on phone screens (`@media (max-width: 640px)`).
+  - Clean solid `#1c1c1e` header bar extending from `top: 0` with `calc(var(--safe-area-top, 0px) + 52px)` height, padding-top protecting against the status bar.
+  - **Left Back Chevron**: Clean circular touch target (44x44px) with `ChevronLeft` icon that navigates back one level in the hierarchy (`handleBreadcrumbClick(Math.max(0, boardHistory.length - 2))`).
+  - **Center Title**: Rendered in Milanote's signature bold serif font (`Georgia, 'Times New Roman', serif`, 19px, bold, white). Backed by an `<input>` for seamless tap-to-edit rename capabilities with instant IPC persistence.
+  - **Right Share Button**: Circular glassmorphism button (36x36px, `rgba(255, 255, 255, 0.12)`) with `UserPlus` icon triggering native `navigator.share`.
+  - Desktop screens (`> 640px`) strictly keep `.mobile-board-topbar` hidden (`display: none`), preserving the desktop breadcrumb topbar without interference.
+- **Home Button Removal**:
+  - Completely removed the floating `[<- Home]` pill (`.mobile-floating-back-btn`) from the phone app interface in favor of the new top bar back chevron.
+- **Unsorted Button Placement & Alignment**:
+  - Repositioned directly below the new top bar on boards (`.mobile-unsorted-floating-pill.under-topbar`) at `top: calc(var(--safe-area-top, 0px) + 52px + 12px) !important; right: 14px !important;`.
+  - When on the root board (no top bar), positioned at `top: calc(var(--safe-area-top, 0px) + 12px) !important; right: 14px !important;`.
+  - Styled with subtle dark glass background (`rgba(30, 30, 32, 0.72)`), 6px border-radius, delicate 1px border (`rgba(255, 255, 255, 0.12)`), bold white count, muted text, and bottom shadow completely removed to match the Milanote design.
 
 ---
 

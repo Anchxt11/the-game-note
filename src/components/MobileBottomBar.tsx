@@ -27,12 +27,19 @@ import {
   Calendar,
   Type,
   Folder,
+  FolderPlus,
+  ArrowLeft,
+  ArrowRight,
+  Rows,
+  AlignRight,
+  ChevronRight,
   List,
   ListOrdered,
   Indent,
   Outdent,
   AlignCenter,
-  Code
+  Code,
+  Upload
 } from 'lucide-react';
 
 interface MobileBottomBarProps {
@@ -40,7 +47,7 @@ interface MobileBottomBarProps {
   boardTitle: string;
   unsortedCount: number;
   onOpenUnsorted: () => void;
-  onOpenBoardsMenu?: () => void;
+  onOpenBoardsMenu: () => void;
   canUndo: boolean;
   canRedo: boolean;
   onUndo: () => void;
@@ -61,7 +68,7 @@ interface MobileBottomBarProps {
   onSendToBack: () => void;
   onAddCommentPin?: (targetId: string) => void;
   onToggleTaskTitle?: (id: string) => void;
-  onSetTaskDueDate?: (id: string, date: string) => void;
+  onSetTaskDueDate?: (id: string, date: string | null) => void;
   onToggleCaption?: (id: string) => void;
   onRename?: (id: string) => void;
   onSetIcon?: (id: string, icon: string) => void;
@@ -72,6 +79,11 @@ interface MobileBottomBarProps {
   onContentChange?: (id: string, newContent: Record<string, any>) => void;
   onDropToolAtScreen?: (tool: ToolType, clientX: number, clientY: number) => void;
   isUnsortedOpen?: boolean;
+  onMoveElementToCanvas?: (element: Element) => void;
+  onMoveElementToUnsorted?: (elementId: string) => void;
+  selectedTableCells?: { tableId: string; cellIndices: number[] } | null;
+  onDeselectTableCells?: () => void;
+  onUploadImageForElement?: (elementId: string, dataUrl: string) => void;
 }
 
 const CLASSIC_COLORS = [
@@ -129,13 +141,22 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
   onContentChange,
   onDropToolAtScreen,
   isUnsortedOpen,
+  onMoveElementToCanvas,
+  onMoveElementToUnsorted,
+  selectedTableCells,
+  onDeselectTableCells,
+  onUploadImageForElement,
 }) => {
   // Navigation mode: 'default' | 'system' | 'tools'
   const [activeMenu, setActiveMenu] = useState<'default' | 'system' | 'tools'>('default');
   const [showMoreContextMenu, setShowMoreContextMenu] = useState(false);
   const [showColorPalette, setShowColorPalette] = useState(false);
+  const [showDateMenu, setShowDateMenu] = useState(false);
+  const [showLineWeightMenu, setShowLineWeightMenu] = useState(false);
+  const [activeCellMenu, setActiveCellMenu] = useState<'textStyle' | 'cellType' | 'color' | 'alignment' | null>(null);
   const [colorMode, setColorMode] = useState<'background' | 'top_strip'>('background');
   const [keyboardHeight, setKeyboardHeight] = useState(0);
+  const imageFileInputRef = useRef<HTMLInputElement>(null);
 
   // Touch drag-and-drop state for tool shelf
   const [draggedTool, setDraggedTool] = useState<{
@@ -146,6 +167,7 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
     x: number;
     y: number;
   } | null>(null);
+  const holdTimerRef = useRef<number | null>(null);
   const toolPointerStartRef = useRef<{
     x: number;
     y: number;
@@ -153,6 +175,8 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
     label: string;
     icon: React.ReactNode;
     isBlue?: boolean;
+    startTime: number;
+    hasLifted: boolean;
   } | null>(null);
   const isDraggingToolRef = useRef(false);
 
@@ -188,6 +212,9 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
       setActiveMenu('default');
       setShowColorPalette(false);
       setShowMoreContextMenu(false);
+      setShowDateMenu(false);
+      setShowLineWeightMenu(false);
+      setActiveCellMenu(null);
     }
   }, [resetTrigger]);
 
@@ -196,6 +223,9 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
     if (!hasSelection) {
       setShowMoreContextMenu(false);
       setShowColorPalette(false);
+      setShowDateMenu(false);
+      setShowLineWeightMenu(false);
+      setActiveCellMenu(null);
     } else {
       setActiveMenu('default');
     }
@@ -208,20 +238,33 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
       if (
         !target.closest('.mobile-main-bottom-bar') &&
         !target.closest('.mobile-color-drawer') &&
+        !target.closest('.mobile-date-drawer') &&
+        !target.closest('.mobile-line-weight-drawer') &&
+        !target.closest('.mobile-cell-menu-drawer') &&
         !target.closest('.mobile-context-sheet') &&
         !target.closest('.mobile-two-finger-sheet')
       ) {
-        if (activeMenu !== 'default' || showColorPalette || showMoreContextMenu) {
+        if (
+          activeMenu !== 'default' ||
+          showColorPalette ||
+          showMoreContextMenu ||
+          showDateMenu ||
+          showLineWeightMenu ||
+          activeCellMenu !== null
+        ) {
           setActiveMenu('default');
           setShowColorPalette(false);
           setShowMoreContextMenu(false);
+          setShowDateMenu(false);
+          setShowLineWeightMenu(false);
+          setActiveCellMenu(null);
         }
       }
     };
 
     window.addEventListener('pointerdown', handleWindowPointerDown);
     return () => window.removeEventListener('pointerdown', handleWindowPointerDown);
-  }, [activeMenu, showColorPalette, showMoreContextMenu]);
+  }, [activeMenu, showColorPalette, showMoreContextMenu, showDateMenu, showLineWeightMenu, activeCellMenu]);
 
   const handleToggleSystemMenu = () => {
     setActiveMenu((prev) => (prev === 'system' ? 'default' : 'system'));
@@ -252,68 +295,148 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
 
   const handleToolPointerDown = (
     item: { tool: ToolType; label: string; icon: React.ReactNode; isBlue?: boolean },
-    e: React.PointerEvent
+    e: React.PointerEvent<HTMLButtonElement>
   ) => {
+    const startX = e.clientX;
+    const startY = e.clientY;
+
+    if (holdTimerRef.current) {
+      window.clearTimeout(holdTimerRef.current);
+      holdTimerRef.current = null;
+    }
+
     toolPointerStartRef.current = {
-      x: e.clientX,
-      y: e.clientY,
+      x: startX,
+      y: startY,
       tool: item.tool,
       label: item.label,
       icon: item.icon,
       isBlue: item.isBlue,
+      startTime: Date.now(),
+      hasLifted: false,
     };
     isDraggingToolRef.current = false;
 
-    const handlePointerMove = (evt: PointerEvent) => {
-      if (!toolPointerStartRef.current) return;
-      const dy = evt.clientY - toolPointerStartRef.current.y;
-      const dist = Math.hypot(evt.clientX - toolPointerStartRef.current.x, dy);
+    // Helper to trigger lift into floating drag follower
+    const triggerLift = (curX: number, curY: number) => {
+      if (!toolPointerStartRef.current || toolPointerStartRef.current.hasLifted) return;
+      toolPointerStartRef.current.hasLifted = true;
+      isDraggingToolRef.current = true;
+      if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+        try { navigator.vibrate(35); } catch (_) {}
+      }
+      setDraggedTool({
+        tool: toolPointerStartRef.current.tool,
+        label: toolPointerStartRef.current.label,
+        icon: toolPointerStartRef.current.icon,
+        isBlue: toolPointerStartRef.current.isBlue,
+        x: curX,
+        y: curY,
+      });
+    };
 
-      if (!isDraggingToolRef.current && (dist > 14 || dy < -8)) {
-        isDraggingToolRef.current = true;
-        if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
-          try { navigator.vibrate(25); } catch (_) {}
+    // 160ms hold-to-lift timer
+    holdTimerRef.current = window.setTimeout(() => {
+      if (toolPointerStartRef.current && !toolPointerStartRef.current.hasLifted) {
+        triggerLift(toolPointerStartRef.current.x, toolPointerStartRef.current.y);
+      }
+      holdTimerRef.current = null;
+    }, 160);
+
+    const handlePointerMove = (evt: any) => {
+      if (!toolPointerStartRef.current) return;
+      const pt = evt.touches?.[0] || evt;
+      const curX = pt.clientX;
+      const curY = pt.clientY;
+      const dx = curX - toolPointerStartRef.current.x;
+      const dy = curY - toolPointerStartRef.current.y;
+      const dist = Math.hypot(dx, dy);
+
+      if (!isDraggingToolRef.current) {
+        if (dy < -8 || dist > 14) {
+          if (holdTimerRef.current) {
+            window.clearTimeout(holdTimerRef.current);
+            holdTimerRef.current = null;
+          }
+          triggerLift(curX, curY);
+        } else if (Math.abs(dx) > 12 && Math.abs(dy) < 8) {
+          // Horizontal scrolling in progress: cancel hold timer
+          if (holdTimerRef.current) {
+            window.clearTimeout(holdTimerRef.current);
+            holdTimerRef.current = null;
+          }
         }
       }
 
       if (isDraggingToolRef.current) {
+        if (evt.cancelable) {
+          evt.preventDefault();
+        }
         setDraggedTool({
           tool: toolPointerStartRef.current.tool,
           label: toolPointerStartRef.current.label,
           icon: toolPointerStartRef.current.icon,
           isBlue: toolPointerStartRef.current.isBlue,
-          x: evt.clientX,
-          y: evt.clientY,
+          x: curX,
+          y: curY,
         });
       }
     };
 
-    const handlePointerUp = (evt: PointerEvent) => {
+    const handlePointerUp = (evt: any) => {
+      if (holdTimerRef.current) {
+        window.clearTimeout(holdTimerRef.current);
+        holdTimerRef.current = null;
+      }
+
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
       window.removeEventListener('pointercancel', handlePointerUp);
+      window.removeEventListener('touchmove', handlePointerMove);
+      window.removeEventListener('touchend', handlePointerUp);
+      window.removeEventListener('touchcancel', handlePointerUp);
+      window.removeEventListener('mousemove', handlePointerMove);
+      window.removeEventListener('mouseup', handlePointerUp);
+
+      const pt = evt.changedTouches?.[0] || evt;
+      const curX = pt.clientX;
+      const curY = pt.clientY;
 
       if (isDraggingToolRef.current && toolPointerStartRef.current) {
         const bottomBarEl = document.querySelector('.mobile-main-bottom-bar');
         const bottomBarTop = bottomBarEl ? bottomBarEl.getBoundingClientRect().top : (window.innerHeight - 70);
 
-        if (evt.clientY < bottomBarTop) {
+        if (curY < bottomBarTop) {
           if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
             try { navigator.vibrate(30); } catch (_) {}
           }
-          onDropToolAtScreen?.(toolPointerStartRef.current.tool, evt.clientX, evt.clientY);
+          onDropToolAtScreen?.(toolPointerStartRef.current.tool, curX, curY);
           setActiveMenu('default');
         }
         setDraggedTool(null);
+        setTimeout(() => {
+          isDraggingToolRef.current = false;
+        }, 60);
+      } else if (toolPointerStartRef.current) {
+        const elapsed = Date.now() - toolPointerStartRef.current.startTime;
+        const dx = curX - toolPointerStartRef.current.x;
+        const dy = curY - toolPointerStartRef.current.y;
+        if (elapsed < 320 && Math.hypot(dx, dy) < 12) {
+          handleToolClick(toolPointerStartRef.current.tool);
+        }
       }
 
       toolPointerStartRef.current = null;
-      isDraggingToolRef.current = false;
     };
 
     window.addEventListener('pointermove', handlePointerMove);
     window.addEventListener('pointerup', handlePointerUp);
     window.addEventListener('pointercancel', handlePointerUp);
+    window.addEventListener('touchmove', handlePointerMove, { passive: false });
+    window.addEventListener('touchend', handlePointerUp);
+    window.addEventListener('touchcancel', handlePointerUp);
+    window.addEventListener('mousemove', handlePointerMove);
+    window.addEventListener('mouseup', handlePointerUp);
   };
 
   const isLocked = Boolean(selectedElement?.style?.is_locked);
@@ -341,6 +464,12 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
     if (selectedElement.element_type === 'line') {
       const updatedStyle = { ...currentStyle, line_color: color };
       onStyleChange?.(selectedElement.id, updatedStyle);
+      return;
+    }
+
+    if (selectedElement.element_type === 'table') {
+      const updatedStyle = { ...currentStyle, background_color: color === 'transparent' ? undefined : color };
+      onStyleChange?.(selectedElement.id, updatedStyle);
       onRecolor(color);
       return;
     }
@@ -355,7 +484,206 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
     }
   };
 
+  const isCellSelected = Boolean(
+    selectedElement?.element_type === 'table' &&
+    selectedTableCells &&
+    selectedTableCells.tableId === selectedElement.id &&
+    selectedTableCells.cellIndices.length > 0
+  );
+
+  const primarySelectedCellIdx = isCellSelected ? selectedTableCells!.cellIndices[0] : 1;
+  const currentCellStyles = selectedElement?.content?.cellStyles || {};
+  const currentCellTypes = selectedElement?.content?.cellTypes || {};
+  const primaryCellStyle = currentCellStyles[primarySelectedCellIdx] || {};
+  const primaryCellType = currentCellTypes[primarySelectedCellIdx]?.type || 'auto';
+  const currentDueDate = selectedElement?.content?.due_date || null;
+
+  const setQuickDate = (daysFromNow: number) => {
+    if (!selectedElement) return;
+    const d = new Date();
+    d.setDate(d.getDate() + daysFromNow);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    onSetTaskDueDate?.(selectedElement.id, `${yyyy}-${mm}-${dd}`);
+    setShowDateMenu(false);
+  };
+
+  const applyCellStyles = (styleUpdates: Record<string, any>) => {
+    if (!selectedElement || !selectedTableCells) return;
+    const content = selectedElement.content || {};
+    const updatedStyles = { ...(content.cellStyles || {}) };
+    selectedTableCells.cellIndices.forEach((idx) => {
+      updatedStyles[idx] = { ...(updatedStyles[idx] || {}), ...styleUpdates };
+    });
+    onContentChange?.(selectedElement.id, { ...content, cellStyles: updatedStyles });
+  };
+
+  const applyCellType = (type: string) => {
+    if (!selectedElement || !selectedTableCells) return;
+    const content = selectedElement.content || {};
+    const updatedTypes = { ...(content.cellTypes || {}) };
+    selectedTableCells.cellIndices.forEach((idx) => {
+      updatedTypes[idx] = { ...(updatedTypes[idx] || {}), type };
+    });
+    onContentChange?.(selectedElement.id, { ...content, cellTypes: updatedTypes });
+    setActiveCellMenu(null);
+  };
+
+  const clearSelectedCells = () => {
+    if (!selectedElement || !selectedTableCells) return;
+    const content = selectedElement.content || {};
+    const cells = { ...(content.cells || {}) };
+    selectedTableCells.cellIndices.forEach((idx) => {
+      cells[idx] = '';
+    });
+    onContentChange?.(selectedElement.id, { ...content, cells });
+  };
+
+  const handleAddTableColumn = (targetColIndex?: number) => {
+    if (!selectedElement) return;
+    const content = selectedElement.content || {};
+    const currentCols = content.columns || 4;
+    const currentRows = content.rows || 4;
+    const newCols = currentCols + 1;
+
+    let targetCol = targetColIndex;
+    if (targetCol === undefined) {
+      if (isCellSelected) {
+        targetCol = ((primarySelectedCellIdx - 1) % currentCols) + 1;
+      } else {
+        targetCol = currentCols;
+      }
+    }
+
+    const cells = content.cells || {};
+    const cellStyles = content.cellStyles || {};
+    const cellTypes = content.cellTypes || {};
+
+    const newCells: Record<number, any> = {};
+    const newStyles: Record<number, any> = {};
+    const newTypes: Record<number, any> = {};
+
+    Object.keys(cells).forEach((key) => {
+      const oldIdx = parseInt(key, 10);
+      if (isNaN(oldIdx)) return;
+      const r = Math.floor((oldIdx - 1) / currentCols) + 1;
+      const c = ((oldIdx - 1) % currentCols) + 1;
+      const newC = c <= targetCol! ? c : c + 1;
+      const newIdx = (r - 1) * newCols + newC;
+      newCells[newIdx] = cells[oldIdx];
+    });
+
+    Object.keys(cellStyles).forEach((key) => {
+      const oldIdx = parseInt(key, 10);
+      if (isNaN(oldIdx)) return;
+      const r = Math.floor((oldIdx - 1) / currentCols) + 1;
+      const c = ((oldIdx - 1) % currentCols) + 1;
+      const newC = c <= targetCol! ? c : c + 1;
+      const newIdx = (r - 1) * newCols + newC;
+      newStyles[newIdx] = cellStyles[oldIdx];
+    });
+
+    Object.keys(cellTypes).forEach((key) => {
+      const oldIdx = parseInt(key, 10);
+      if (isNaN(oldIdx)) return;
+      const r = Math.floor((oldIdx - 1) / currentCols) + 1;
+      const c = ((oldIdx - 1) % currentCols) + 1;
+      const newC = c <= targetCol! ? c : c + 1;
+      const newIdx = (r - 1) * newCols + newC;
+      newTypes[newIdx] = cellTypes[oldIdx];
+    });
+
+    const colWidths = Array.isArray(content.colWidths) ? [...content.colWidths] : Array(currentCols).fill(100);
+    const targetWidth = colWidths[targetCol! - 1] || 100;
+    colWidths.splice(targetCol!, 0, targetWidth);
+
+    onContentChange?.(selectedElement.id, {
+      ...content,
+      columns: newCols,
+      colWidths,
+      cells: newCells,
+      cellStyles: newStyles,
+      cellTypes: newTypes,
+    });
+  };
+
+  const handleAddTableRow = (targetRowIndex?: number) => {
+    if (!selectedElement) return;
+    const content = selectedElement.content || {};
+    const currentCols = content.columns || 4;
+    const currentRows = content.rows || 4;
+    const newRows = currentRows + 1;
+
+    let targetRow = targetRowIndex;
+    if (targetRow === undefined) {
+      if (isCellSelected) {
+        targetRow = Math.floor((primarySelectedCellIdx - 1) / currentCols) + 1;
+      } else {
+        targetRow = currentRows;
+      }
+    }
+
+    const cells = content.cells || {};
+    const cellStyles = content.cellStyles || {};
+    const cellTypes = content.cellTypes || {};
+
+    const newCells: Record<number, any> = {};
+    const newStyles: Record<number, any> = {};
+    const newTypes: Record<number, any> = {};
+
+    Object.keys(cells).forEach((key) => {
+      const oldIdx = parseInt(key, 10);
+      if (isNaN(oldIdx)) return;
+      const r = Math.floor((oldIdx - 1) / currentCols) + 1;
+      const c = ((oldIdx - 1) % currentCols) + 1;
+      const newR = r <= targetRow! ? r : r + 1;
+      const newIdx = (newR - 1) * currentCols + c;
+      newCells[newIdx] = cells[oldIdx];
+    });
+
+    Object.keys(cellStyles).forEach((key) => {
+      const oldIdx = parseInt(key, 10);
+      if (isNaN(oldIdx)) return;
+      const r = Math.floor((oldIdx - 1) / currentCols) + 1;
+      const c = ((oldIdx - 1) % currentCols) + 1;
+      const newR = r <= targetRow! ? r : r + 1;
+      const newIdx = (newR - 1) * currentCols + c;
+      newStyles[newIdx] = cellStyles[oldIdx];
+    });
+
+    Object.keys(cellTypes).forEach((key) => {
+      const oldIdx = parseInt(key, 10);
+      if (isNaN(oldIdx)) return;
+      const r = Math.floor((oldIdx - 1) / currentCols) + 1;
+      const c = ((oldIdx - 1) % currentCols) + 1;
+      const newR = r <= targetRow! ? r : r + 1;
+      const newIdx = (newR - 1) * currentCols + c;
+      newTypes[newIdx] = cellTypes[oldIdx];
+    });
+
+    const rowHeights = Array.isArray(content.rowHeights) ? [...content.rowHeights] : Array(currentRows).fill(38);
+    const targetHeight = rowHeights[targetRow! - 1] || 38;
+    rowHeights.splice(targetRow!, 0, targetHeight);
+
+    onContentChange?.(selectedElement.id, {
+      ...content,
+      rows: newRows,
+      rowHeights,
+      cells: newCells,
+      cellStyles: newStyles,
+      cellTypes: newTypes,
+    });
+  };
+
   const handleTextFormat = (cmd: string, val: string = '') => {
+    const editor = editingElement
+      ? (document.querySelector(`#milanote-el-${editingElement.id} .note-rich-editor`) as HTMLElement | null)
+      : null;
+    if (editor && document.activeElement !== editor && !editor.contains(document.activeElement)) {
+      editor.focus();
+    }
+
     if (cmd === 'code') {
       const sel = window.getSelection();
       if (sel && sel.toString().trim() !== '') {
@@ -372,9 +700,9 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
     // Sync editor HTML back to note
     if (editingElement) {
       setTimeout(() => {
-        const editor = document.querySelector(`#milanote-el-${editingElement.id} .note-rich-editor`) as HTMLElement | null;
-        if (editor) {
-          onContentChange?.(editingElement.id, { ...editingElement.content, text: editor.innerHTML });
+        const ed = document.querySelector(`#milanote-el-${editingElement.id} .note-rich-editor`) as HTMLElement | null;
+        if (ed) {
+          onContentChange?.(editingElement.id, { ...editingElement.content, text: ed.innerHTML });
         }
       }, 10);
     }
@@ -382,14 +710,36 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
 
   return (
     <>
-      {/* TOP-RIGHT FLOATING UNSORTED PILL (IMAGES 1, 2, 3, 4, 5) */}
+      {/* Hidden File Input for Image Element Replacement */}
+      <input
+        type="file"
+        ref={imageFileInputRef}
+        style={{ display: 'none' }}
+        accept="image/*"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file && selectedElement) {
+            const reader = new FileReader();
+            reader.onload = () => {
+              if (typeof reader.result === 'string') {
+                onUploadImageForElement?.(selectedElement.id, reader.result);
+              }
+            };
+            reader.readAsDataURL(file);
+          }
+          e.target.value = '';
+        }}
+      />
+
+      {/* TOP-RIGHT FLOATING UNSORTED PILL (IMAGE 2) */}
       {!isTyping && (
         <button
-          className="mobile-unsorted-floating-pill"
+          className={`mobile-unsorted-floating-pill ${currentBoardId !== 'root-board' ? 'under-topbar' : ''}`}
           onClick={onOpenUnsorted}
           title="Open Unsorted drawer"
         >
-          <span>{unsortedCount} Unsorted</span>
+          <span className="mobile-unsorted-pill-count">{unsortedCount}</span>
+          <span className="mobile-unsorted-pill-text">Unsorted</span>
         </button>
       )}
 
@@ -463,6 +813,30 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
               <span>Send to Back</span>
             </button>
 
+            {selectedElement?.style?.is_unsorted ? (
+              <button
+                className="mobile-context-sheet-item"
+                onClick={() => {
+                  onMoveElementToCanvas?.(selectedElement);
+                  setShowMoreContextMenu(false);
+                  onDeselect();
+                }}
+              >
+                <span>Place on Board</span>
+              </button>
+            ) : (
+              <button
+                className="mobile-context-sheet-item"
+                onClick={() => {
+                  if (selectedElement) onMoveElementToUnsorted?.(selectedElement.id);
+                  setShowMoreContextMenu(false);
+                  onDeselect();
+                }}
+              >
+                <span>Move to Unsorted</span>
+              </button>
+            )}
+
             <button
               className="mobile-context-sheet-item danger"
               onClick={() => {
@@ -477,13 +851,13 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
       )}
 
       {/* MOBILE COLOR PALETTE DRAWER (ABOVE SELECTION BAR) - EXACT DESKTOP CAPABILITY */}
-      {showColorPalette && hasSelection && (
+      {showColorPalette && hasSelection && !isCellSelected && (
         <div
           className="mobile-color-drawer"
           onClick={(e) => e.stopPropagation()}
         >
           {/* Mode Switcher Tabs for elements supporting Top Strip */}
-          {selectedElement?.element_type !== 'nested_board' && selectedElement?.element_type !== 'line' && (
+          {selectedElement?.element_type !== 'nested_board' && selectedElement?.element_type !== 'line' && selectedElement?.element_type !== 'table' && (
             <div className="mobile-color-mode-tabs">
               <button
                 className={`mobile-color-mode-tab ${colorMode === 'background' ? 'active' : ''}`}
@@ -515,7 +889,7 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
 
           {/* Grid 1: Classic Colors & None */}
           <div className="mobile-color-swatches-grid">
-            {colorMode === 'top_strip' && (
+            {colorMode === 'top_strip' && selectedElement?.element_type !== 'line' && selectedElement?.element_type !== 'table' && (
               <button
                 className={`mobile-color-swatch-box ${!currentTopStrip ? 'selected' : ''}`}
                 style={{ backgroundColor: '#353c48' }}
@@ -530,20 +904,22 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
               if (colorMode === 'top_strip' && col === 'transparent') return null;
 
               const isTransparent = col === 'transparent';
-              const isSelected = colorMode === 'background'
-                ? (currentBgColor === col || (!currentBgColor && isTransparent))
-                : (currentTopStrip === col);
+              const isSelected = selectedElement?.element_type === 'line'
+                ? ((selectedElement.style?.line_color || '#a8b0c0') === col)
+                : colorMode === 'background'
+                  ? (currentBgColor === col || (!currentBgColor && isTransparent))
+                  : (currentTopStrip === col);
 
               return (
                 <button
                   key={idx}
                   className={`mobile-color-swatch-box ${isTransparent ? 'color-swatch-transparent-grid' : ''} ${isSelected ? 'selected' : ''}`}
-                  style={colorMode === 'background' ? { backgroundColor: isTransparent ? undefined : col } : { backgroundColor: '#353c48' }}
+                  style={selectedElement?.element_type === 'line' ? { backgroundColor: '#353c48' } : colorMode === 'background' ? { backgroundColor: isTransparent ? undefined : col } : { backgroundColor: '#353c48' }}
                   onClick={() => handleColorSelect(col)}
                   title={col}
                 >
-                  {colorMode === 'top_strip' && !isTransparent && (
-                    <div className="color-swatch-top-strip-preview" style={{ backgroundColor: col }} />
+                  {(colorMode === 'top_strip' || selectedElement?.element_type === 'line') && !isTransparent && (
+                    <div className="color-swatch-top-strip-preview" style={{ backgroundColor: col, height: selectedElement?.element_type === 'line' ? '100%' : undefined }} />
                   )}
                   {isSelected && <Check size={14} color="#ffffff" />}
                 </button>
@@ -552,7 +928,7 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
           </div>
 
           {/* Grid 2: Lettered Presets (In Background Mode) */}
-          {colorMode === 'background' && (
+          {colorMode === 'background' && selectedElement?.element_type !== 'line' && selectedElement?.element_type !== 'table' && (
             <div className="mobile-color-presets-row">
               {LETTERED_PRESETS.map((preset, idx) => {
                 const isSelected = currentBgColor === preset.color;
@@ -574,17 +950,19 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
           {/* Grid 3: Pastel Colors */}
           <div className="mobile-color-swatches-grid pastels">
             {PASTEL_COLORS.map((col, idx) => {
-              const isSelected = colorMode === 'background' ? (currentBgColor === col) : (currentTopStrip === col);
+              const isSelected = selectedElement?.element_type === 'line'
+                ? ((selectedElement.style?.line_color || '#a8b0c0') === col)
+                : colorMode === 'background' ? (currentBgColor === col) : (currentTopStrip === col);
               return (
                 <button
                   key={idx}
                   className={`mobile-color-swatch-box ${isSelected ? 'selected' : ''}`}
-                  style={colorMode === 'background' ? { backgroundColor: col } : { backgroundColor: '#353c48' }}
+                  style={selectedElement?.element_type === 'line' ? { backgroundColor: '#353c48' } : colorMode === 'background' ? { backgroundColor: col } : { backgroundColor: '#353c48' }}
                   onClick={() => handleColorSelect(col)}
                   title={col}
                 >
-                  {colorMode === 'top_strip' && (
-                    <div className="color-swatch-top-strip-preview" style={{ backgroundColor: col }} />
+                  {(colorMode === 'top_strip' || selectedElement?.element_type === 'line') && (
+                    <div className="color-swatch-top-strip-preview" style={{ backgroundColor: col, height: selectedElement?.element_type === 'line' ? '100%' : undefined }} />
                   )}
                   {isSelected && <Check size={14} color="#ffffff" />}
                 </button>
@@ -602,6 +980,286 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
               onChange={(e) => handleColorSelect(e.target.value)}
             />
           </label>
+        </div>
+      )}
+
+      {/* MOBILE DUE DATE SCHEDULER DRAWER (FOR TO-DO LIST) */}
+      {showDateMenu && selectedElement?.element_type === 'task_list' && (
+        <div className="mobile-date-drawer" onClick={(e) => e.stopPropagation()}>
+          <div className="mobile-drawer-header">
+            <span>Schedule Due Date</span>
+            {currentDueDate && (
+              <span className="mobile-date-badge">Due {currentDueDate}</span>
+            )}
+          </div>
+
+          <div className="mobile-date-shortcuts-row">
+            <button className="mobile-date-shortcut-btn" onClick={() => setQuickDate(0)}>
+              <span>Today</span>
+              <span className="mobile-date-offset">+0d</span>
+            </button>
+            <button className="mobile-date-shortcut-btn" onClick={() => setQuickDate(1)}>
+              <span>Tomorrow</span>
+              <span className="mobile-date-offset">+1d</span>
+            </button>
+            <button className="mobile-date-shortcut-btn" onClick={() => setQuickDate(7)}>
+              <span>Next Week</span>
+              <span className="mobile-date-offset">+7d</span>
+            </button>
+          </div>
+
+          <div className="mobile-date-custom-section">
+            <label>Custom Date</label>
+            <input
+              type="date"
+              className="mobile-date-native-input"
+              value={currentDueDate || ''}
+              onChange={(e) => {
+                onSetTaskDueDate?.(selectedElement.id, e.target.value || null);
+                setShowDateMenu(false);
+              }}
+            />
+          </div>
+
+          {currentDueDate && (
+            <button
+              className="mobile-date-clear-btn"
+              onClick={() => {
+                onSetTaskDueDate?.(selectedElement.id, null);
+                setShowDateMenu(false);
+              }}
+            >
+              Clear Due Date
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* MOBILE LINE WEIGHT DRAWER (FOR LINE ELEMENT) */}
+      {showLineWeightMenu && selectedElement?.element_type === 'line' && (
+        <div className="mobile-line-weight-drawer" onClick={(e) => e.stopPropagation()}>
+          <div className="mobile-drawer-header">
+            <span>Line Weight</span>
+          </div>
+          <div className="mobile-line-weight-row">
+            <button
+              className={`mobile-weight-option-btn ${(selectedElement.style?.line_weight || 2) === 2 ? 'active' : ''}`}
+              onClick={() => {
+                onStyleChange?.(selectedElement.id, { ...(selectedElement.style || {}), line_weight: 2 });
+                setShowLineWeightMenu(false);
+              }}
+              title="Thin (2px)"
+            >
+              <svg width="28" height="28" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <line x1="4" y1="20" x2="20" y2="4" />
+              </svg>
+              <span>2px</span>
+            </button>
+
+            <button
+              className={`mobile-weight-option-btn ${(selectedElement.style?.line_weight || 2) === 4 ? 'active' : ''}`}
+              onClick={() => {
+                onStyleChange?.(selectedElement.id, { ...(selectedElement.style || {}), line_weight: 4 });
+                setShowLineWeightMenu(false);
+              }}
+              title="Medium (4px)"
+            >
+              <svg width="28" height="28" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round">
+                <line x1="4" y1="20" x2="20" y2="4" />
+              </svg>
+              <span>4px</span>
+            </button>
+
+            <button
+              className={`mobile-weight-option-btn ${(selectedElement.style?.line_weight || 2) === 6 ? 'active' : ''}`}
+              onClick={() => {
+                onStyleChange?.(selectedElement.id, { ...(selectedElement.style || {}), line_weight: 6 });
+                setShowLineWeightMenu(false);
+              }}
+              title="Thick (6px)"
+            >
+              <svg width="28" height="28" viewBox="0 0 24 24" stroke="currentColor" strokeWidth="5.5" strokeLinecap="round">
+                <line x1="4" y1="20" x2="20" y2="4" />
+              </svg>
+              <span>6px</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* MOBILE CELL MENU DRAWER (FOR CELL FORMATTING IN TABLE) */}
+      {isCellSelected && activeCellMenu && (
+        <div className="mobile-cell-menu-drawer" onClick={(e) => e.stopPropagation()}>
+          {activeCellMenu === 'textStyle' && (
+            <>
+              <div className="mobile-drawer-header">
+                <span>Text Color</span>
+              </div>
+              <div className="mobile-color-swatches-grid">
+                {[
+                  { label: 'A', color: '#ffffff', id: 'default' },
+                  { label: 'A', color: '#33a1fd', id: '#33a1fd' },
+                  { label: 'A', color: '#24d06a', id: '#24d06a' },
+                  { label: 'A', color: '#ff9800', id: '#ff9800' },
+                  { label: 'A', color: '#f44336', id: '#f44336' },
+                  { label: 'A', color: '#9e9e9e', id: '#9e9e9e' },
+                ].map((item) => {
+                  const isSel = primaryCellStyle.textColor === item.id || (!primaryCellStyle.textColor && item.id === 'default');
+                  return (
+                    <button
+                      key={item.id}
+                      className={`mobile-color-swatch-box ${isSel ? 'selected' : ''}`}
+                      style={{ color: item.color, backgroundColor: '#353c48', fontSize: '15px', fontWeight: 'bold' }}
+                      onClick={() => applyCellStyles({ textColor: item.id === 'default' ? undefined : item.id })}
+                    >
+                      {item.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="mobile-drawer-header" style={{ marginTop: '8px' }}>
+                <span>Highlight</span>
+              </div>
+              <div className="mobile-color-swatches-grid">
+                {[
+                  { bg: '#181a1f', text: '#ffffff', id: 'dark' },
+                  { bg: '#58daf6', text: '#181a1f', id: '#58daf6' },
+                  { bg: '#b8f331', text: '#181a1f', id: '#b8f331' },
+                  { bg: '#f9d72f', text: '#181a1f', id: '#f9d72f' },
+                  { bg: '#f785be', text: '#181a1f', id: '#f785be' },
+                  { bg: '#e2e8f0', text: '#181a1f', id: '#e2e8f0' },
+                ].map((item, idx) => {
+                  const isSel = primaryCellStyle.highlightColor === item.id;
+                  return (
+                    <button
+                      key={idx}
+                      className={`mobile-color-swatch-box ${isSel ? 'selected' : ''}`}
+                      style={{ backgroundColor: item.bg, color: item.text, fontSize: '15px', fontWeight: 'bold' }}
+                      onClick={() => applyCellStyles({ highlightColor: isSel ? undefined : item.id })}
+                    >
+                      A
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {activeCellMenu === 'cellType' && (
+            <div className="mobile-cell-type-list">
+              {[
+                { label: 'Auto', icon: 'A', type: 'auto' },
+                { label: 'Number', icon: '123', type: 'number' },
+                { label: 'Currency', icon: '$', type: 'currency' },
+                { label: 'Percentage', icon: '%', type: 'percentage' },
+                { label: 'Text', icon: 'ABC', type: 'text' },
+                { label: 'Date & Time', icon: '📅', type: 'date' },
+                { label: 'Checkbox', icon: '☑', type: 'checkbox' },
+              ].map((item) => {
+                const isChecked = primaryCellType === item.type;
+                return (
+                  <button
+                    key={item.type}
+                    className={`mobile-cell-type-btn ${isChecked ? 'active' : ''}`}
+                    onClick={() => applyCellType(item.type)}
+                  >
+                    <span className="mobile-cell-type-icon">{item.icon}</span>
+                    <span className="mobile-cell-type-label">{item.label}</span>
+                    {isChecked && <Check size={16} />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {activeCellMenu === 'color' && (
+            <>
+              <div className="mobile-drawer-header">
+                <span>Cell Tint</span>
+              </div>
+              <div className="mobile-color-swatches-grid">
+                {[
+                  { bg: 'transparent', border: '#586072', id: 'none' },
+                  { bg: '#2b3648', id: '#2b3648' },
+                  { bg: '#233d32', id: '#233d32' },
+                  { bg: '#423625', id: '#423625' },
+                  { bg: '#422828', id: '#422828' },
+                  { bg: '#353046', id: '#353046' },
+                ].map((tint, idx) => {
+                  const isSel = (primaryCellStyle.cellColor || 'none') === tint.id;
+                  return (
+                    <button
+                      key={idx}
+                      className={`mobile-color-swatch-box ${isSel ? 'selected' : ''}`}
+                      style={{ backgroundColor: tint.bg, border: `1px solid ${tint.border || tint.bg}` }}
+                      onClick={() => applyCellStyles({ cellColor: tint.id === 'none' ? undefined : tint.id })}
+                    >
+                      {isSel && <Check size={14} color="#ffffff" />}
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          {activeCellMenu === 'alignment' && (
+            <div className="mobile-cell-align-grid">
+              <div className="mobile-drawer-header">
+                <span>Horizontal Alignment</span>
+              </div>
+              <div className="mobile-cell-align-row">
+                <button
+                  className={`mobile-cell-align-btn ${(!primaryCellStyle.alignX || primaryCellStyle.alignX === 'left') ? 'active' : ''}`}
+                  onClick={() => applyCellStyles({ alignX: 'left' })}
+                  title="Left"
+                >
+                  <AlignLeft size={18} />
+                </button>
+                <button
+                  className={`mobile-cell-align-btn ${primaryCellStyle.alignX === 'center' ? 'active' : ''}`}
+                  onClick={() => applyCellStyles({ alignX: 'center' })}
+                  title="Center"
+                >
+                  <AlignCenter size={18} />
+                </button>
+                <button
+                  className={`mobile-cell-align-btn ${primaryCellStyle.alignX === 'right' ? 'active' : ''}`}
+                  onClick={() => applyCellStyles({ alignX: 'right' })}
+                  title="Right"
+                >
+                  <AlignRight size={18} />
+                </button>
+              </div>
+
+              <div className="mobile-drawer-header" style={{ marginTop: '6px' }}>
+                <span>Vertical Alignment</span>
+              </div>
+              <div className="mobile-cell-align-row">
+                <button
+                  className={`mobile-cell-align-btn ${(!primaryCellStyle.alignY || primaryCellStyle.alignY === 'top') ? 'active' : ''}`}
+                  onClick={() => applyCellStyles({ alignY: 'top' })}
+                  title="Top"
+                >
+                  <span>Top</span>
+                </button>
+                <button
+                  className={`mobile-cell-align-btn ${primaryCellStyle.alignY === 'middle' ? 'active' : ''}`}
+                  onClick={() => applyCellStyles({ alignY: 'middle' })}
+                  title="Middle"
+                >
+                  <span>Middle</span>
+                </button>
+                <button
+                  className={`mobile-cell-align-btn ${primaryCellStyle.alignY === 'bottom' ? 'active' : ''}`}
+                  onClick={() => applyCellStyles({ alignY: 'bottom' })}
+                  title="Bottom"
+                >
+                  <span>Bottom</span>
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -637,6 +1295,7 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
               {/* T button with rainbow dot (Screenshot 2) */}
               <button
                 className="mobile-format-btn"
+                onTouchStart={(e) => e.preventDefault()}
                 onPointerDown={(e) => e.preventDefault()}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={(e) => {
@@ -654,6 +1313,7 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
               {/* Bold (B) */}
               <button
                 className="mobile-format-btn"
+                onTouchStart={(e) => e.preventDefault()}
                 onPointerDown={(e) => e.preventDefault()}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={(e) => {
@@ -668,6 +1328,7 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
               {/* Italic (I) */}
               <button
                 className="mobile-format-btn"
+                onTouchStart={(e) => e.preventDefault()}
                 onPointerDown={(e) => e.preventDefault()}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={(e) => {
@@ -682,6 +1343,7 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
               {/* Strikethrough (S) */}
               <button
                 className="mobile-format-btn"
+                onTouchStart={(e) => e.preventDefault()}
                 onPointerDown={(e) => e.preventDefault()}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={(e) => {
@@ -696,6 +1358,7 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
               {/* Underline (U) */}
               <button
                 className="mobile-format-btn"
+                onTouchStart={(e) => e.preventDefault()}
                 onPointerDown={(e) => e.preventDefault()}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={(e) => {
@@ -710,6 +1373,7 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
               {/* Bullet list (Screenshot 2 & 3) */}
               <button
                 className="mobile-format-btn"
+                onTouchStart={(e) => e.preventDefault()}
                 onPointerDown={(e) => e.preventDefault()}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={(e) => {
@@ -724,6 +1388,7 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
               {/* Numbered list (Screenshot 3) */}
               <button
                 className="mobile-format-btn"
+                onTouchStart={(e) => e.preventDefault()}
                 onPointerDown={(e) => e.preventDefault()}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={(e) => {
@@ -738,6 +1403,7 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
               {/* Indent (=>) */}
               <button
                 className="mobile-format-btn"
+                onTouchStart={(e) => e.preventDefault()}
                 onPointerDown={(e) => e.preventDefault()}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={(e) => {
@@ -752,6 +1418,7 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
               {/* Outdent (<=) */}
               <button
                 className="mobile-format-btn"
+                onTouchStart={(e) => e.preventDefault()}
                 onPointerDown={(e) => e.preventDefault()}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={(e) => {
@@ -766,6 +1433,7 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
               {/* Align (≡) */}
               <button
                 className="mobile-format-btn"
+                onTouchStart={(e) => e.preventDefault()}
                 onPointerDown={(e) => e.preventDefault()}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={(e) => {
@@ -781,6 +1449,7 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
               {/* Code block (</>) */}
               <button
                 className="mobile-format-btn"
+                onTouchStart={(e) => e.preventDefault()}
                 onPointerDown={(e) => e.preventDefault()}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={(e) => {
@@ -796,6 +1465,7 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
             {/* Right: Done button (Screenshot 2 & 3) */}
             <button
               className="mobile-format-done-btn"
+              onTouchStart={(e) => e.preventDefault()}
               onPointerDown={(e) => e.preventDefault()}
               onMouseDown={(e) => e.preventDefault()}
               onClick={(e) => {
@@ -814,112 +1484,452 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
               =================================================================== */
           <div className="mobile-bar-selection-layout">
             <div className="mobile-selection-actions-left">
-              {/* Color Action Button */}
-              <button
-                className={`mobile-action-btn ${showColorPalette ? 'active' : ''}`}
-                onClick={() => setShowColorPalette(!showColorPalette)}
-                title="Change color theme"
-              >
-                <div
-                  className="mobile-action-icon-box color-indicator"
-                  style={{
-                    backgroundColor: currentBgColor || 'rgba(255, 255, 255, 0.1)',
-                    borderColor: 'rgba(255, 255, 255, 0.4)',
-                    position: 'relative',
-                    overflow: 'hidden'
-                  }}
-                >
-                  {currentTopStrip && (
-                    <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: '4px', backgroundColor: currentTopStrip }} />
-                  )}
-                </div>
-                <span>Color</span>
-              </button>
-
-              {/* Type-Specific Action Buttons */}
-              {selectedElement?.element_type === 'note' && (
-                <>
-                  <button className="mobile-action-btn" onClick={() => {}} title="Labels">
-                    <div className="mobile-action-icon-box"><Tag size={19} /></div>
-                    <span>Labels</span>
-                  </button>
-                  <button className="mobile-action-btn" onClick={() => {}} title="Reactions">
-                    <div className="mobile-action-icon-box"><Smile size={19} /></div>
-                    <span>Reactions</span>
-                  </button>
-                </>
-              )}
-
-              {selectedElement?.element_type === 'task_list' && (
-                <>
-                  <button className="mobile-action-btn" onClick={() => onToggleTaskTitle?.(selectedElement.id)} title="Toggle title">
-                    <div className="mobile-action-icon-box"><Type size={19} /></div>
-                    <span>Title</span>
-                  </button>
-                  <button className="mobile-action-btn" onClick={() => onSetTaskDueDate?.(selectedElement.id, new Date().toISOString().split('T')[0])} title="Due date">
-                    <div className="mobile-action-icon-box"><Calendar size={19} /></div>
-                    <span>Due date</span>
-                  </button>
-                </>
-              )}
-
-              {selectedElement?.element_type === 'nested_board' && (
-                <>
-                  <button className="mobile-action-btn" onClick={() => onSetIcon?.(selectedElement.id, 'FolderPlus')} title="Board icon">
-                    <div className="mobile-action-icon-box"><Folder size={19} /></div>
-                    <span>Icon</span>
-                  </button>
-                  <button className="mobile-action-btn" onClick={() => onRename?.(selectedElement.id)} title="Rename board">
-                    <div className="mobile-action-icon-box"><Type size={19} /></div>
-                    <span>Rename</span>
-                  </button>
-                </>
-              )}
-
-              {(selectedElement?.element_type === 'image' || selectedElement?.element_type === 'link') && (
-                <button className="mobile-action-btn" onClick={() => onToggleCaption?.(selectedElement.id)} title="Toggle caption">
-                  <div className="mobile-action-icon-box"><Type size={19} /></div>
-                  <span>Caption</span>
-                </button>
-              )}
-
-              {selectedElement?.element_type === 'column' && (
-                <button className="mobile-action-btn" onClick={() => onRename?.(selectedElement.id)} title="Rename column">
-                  <div className="mobile-action-icon-box"><Type size={19} /></div>
-                  <span>Title</span>
-                </button>
-              )}
-
-              {/* Comment Action Button */}
-              {selectedElement && selectedElement.element_type !== 'comment' && (
+              {/* Place on board button if element is currently in Unsorted */}
+              {selectedElement?.style?.is_unsorted && (
                 <button
                   className="mobile-action-btn"
-                  onClick={() => selectedElement && onAddCommentPin?.(selectedElement.id)}
-                  title="Add comment"
+                  onClick={() => {
+                    onMoveElementToCanvas?.(selectedElement);
+                    onDeselect();
+                  }}
+                  title="Place on board"
                 >
-                  <div className="mobile-action-icon-box"><MessageSquarePlus size={19} /></div>
-                  <span>Comment</span>
+                  <div className="mobile-action-icon-box">
+                    <FolderPlus size={19} />
+                  </div>
+                  <span>Place</span>
                 </button>
               )}
 
-              {/* More ('...') Button -> Opens Screen 5 Context Menu */}
-              <button
-                className="mobile-action-btn"
-                onClick={() => setShowMoreContextMenu(true)}
-                title="More actions"
-              >
-                <div className="mobile-action-icon-box">
-                  <MoreHorizontal size={19} />
-                </div>
-                <span>More</span>
-              </button>
+              {/* TABLE CELL ACTIONS (When specific cell(s) in a table are selected) */}
+              {isCellSelected ? (
+                <>
+                  {/* Text Style (Color & Highlight) */}
+                  <button
+                    className={`mobile-action-btn ${activeCellMenu === 'textStyle' ? 'active' : ''}`}
+                    onClick={() => setActiveCellMenu(activeCellMenu === 'textStyle' ? null : 'textStyle')}
+                    title="Text style"
+                  >
+                    <div className="mobile-action-icon-box">
+                      <Type size={19} />
+                    </div>
+                    <span>Text style</span>
+                  </button>
+
+                  {/* Cell Type (Auto, Number, %, Text, Date, Checkbox) */}
+                  <button
+                    className={`mobile-action-btn ${activeCellMenu === 'cellType' ? 'active' : ''}`}
+                    onClick={() => setActiveCellMenu(activeCellMenu === 'cellType' ? null : 'cellType')}
+                    title="Cell type"
+                  >
+                    <div className="mobile-action-icon-box">
+                      <span style={{ fontWeight: 800, fontSize: '15px' }}>
+                        {primaryCellType === 'currency' ? '$' : primaryCellType === 'percentage' ? '%' : primaryCellType === 'number' ? '#' : primaryCellType === 'checkbox' ? '☑' : 'A'}
+                      </span>
+                    </div>
+                    <span>Type</span>
+                  </button>
+
+                  {/* Cell Tint / Color */}
+                  <button
+                    className={`mobile-action-btn ${activeCellMenu === 'color' ? 'active' : ''}`}
+                    onClick={() => setActiveCellMenu(activeCellMenu === 'color' ? null : 'color')}
+                    title="Cell tint"
+                  >
+                    <div
+                      className="mobile-action-icon-box color-indicator"
+                      style={{
+                        backgroundColor: primaryCellStyle.cellColor || '#2a2a2d',
+                        borderColor: primaryCellStyle.cellColor ? 'rgba(255, 255, 255, 0.4)' : 'rgba(255, 255, 255, 0.08)'
+                      }}
+                    />
+                    <span>Tint</span>
+                  </button>
+
+                  {/* Alignment */}
+                  <button
+                    className={`mobile-action-btn ${activeCellMenu === 'alignment' ? 'active' : ''}`}
+                    onClick={() => setActiveCellMenu(activeCellMenu === 'alignment' ? null : 'alignment')}
+                    title="Cell alignment"
+                  >
+                    <div className="mobile-action-icon-box">
+                      {primaryCellStyle.alignX === 'center' ? <AlignCenter size={19} /> : primaryCellStyle.alignX === 'right' ? <AlignRight size={19} /> : <AlignLeft size={19} />}
+                    </div>
+                    <span>Align</span>
+                  </button>
+
+                  {/* Add Column */}
+                  <button
+                    className="mobile-action-btn"
+                    onClick={() => handleAddTableColumn()}
+                    title="Add column to right of cell"
+                  >
+                    <div className="mobile-action-icon-box">
+                      <Columns size={19} />
+                    </div>
+                    <span>+ Col</span>
+                  </button>
+
+                  {/* Add Row */}
+                  <button
+                    className="mobile-action-btn"
+                    onClick={() => handleAddTableRow()}
+                    title="Add row below cell"
+                  >
+                    <div className="mobile-action-icon-box">
+                      <Rows size={19} />
+                    </div>
+                    <span>+ Row</span>
+                  </button>
+
+                  {/* Clear Cell Content */}
+                  <button
+                    className="mobile-action-btn"
+                    onClick={clearSelectedCells}
+                    title="Clear cell contents"
+                  >
+                    <div className="mobile-action-icon-box">
+                      <Trash2 size={19} />
+                    </div>
+                    <span>Clear</span>
+                  </button>
+                </>
+              ) : (
+                /* ELEMENT-LEVEL ACTIONS */
+                <>
+                  {/* Color Action Button */}
+                  <button
+                    className={`mobile-action-btn ${showColorPalette ? 'active' : ''}`}
+                    onClick={() => {
+                      setShowColorPalette(!showColorPalette);
+                      setShowDateMenu(false);
+                      setShowLineWeightMenu(false);
+                    }}
+                    title="Change color theme"
+                  >
+                    <div
+                      className="mobile-action-icon-box color-indicator"
+                      style={{
+                        backgroundColor: selectedElement?.element_type === 'line'
+                          ? (selectedElement.style?.line_color || '#a8b0c0')
+                          : (currentBgColor || 'rgba(255, 255, 255, 0.1)'),
+                        borderColor: 'rgba(255, 255, 255, 0.4)',
+                        position: 'relative',
+                        overflow: 'hidden'
+                      }}
+                    >
+                      {currentTopStrip && selectedElement?.element_type !== 'line' && (
+                        <div style={{ position: 'absolute', top: 0, left: 0, right: 0, height: '4px', backgroundColor: currentTopStrip }} />
+                      )}
+                    </div>
+                    <span>Color</span>
+                  </button>
+
+                  {/* NOTE ACTIONS */}
+                  {selectedElement?.element_type === 'note' && (
+                    <>
+                      <button className="mobile-action-btn" onClick={() => {}} title="Labels">
+                        <div className="mobile-action-icon-box"><Tag size={19} /></div>
+                        <span>Labels</span>
+                      </button>
+                      <button className="mobile-action-btn" onClick={() => {}} title="Reactions">
+                        <div className="mobile-action-icon-box"><Smile size={19} /></div>
+                        <span>Reactions</span>
+                      </button>
+                    </>
+                  )}
+
+                  {/* TO-DO LIST ACTIONS (FULL DESKTOP PARITY) */}
+                  {selectedElement?.element_type === 'task_list' && (
+                    <>
+                      <button
+                        className={`mobile-action-btn ${Boolean(selectedElement.content?.show_title) ? 'active' : ''}`}
+                        onClick={() => onToggleTaskTitle?.(selectedElement.id)}
+                        title="Toggle title"
+                      >
+                        <div className="mobile-action-icon-box"><Type size={19} /></div>
+                        <span>Title</span>
+                      </button>
+                      <button
+                        className={`mobile-action-btn ${Boolean(selectedElement.content?.due_date) ? 'active' : ''} ${showDateMenu ? 'active' : ''}`}
+                        onClick={() => {
+                          setShowDateMenu(!showDateMenu);
+                          setShowColorPalette(false);
+                        }}
+                        title={selectedElement.content?.due_date ? `Due ${selectedElement.content.due_date}` : "Due date"}
+                      >
+                        <div className="mobile-action-icon-box"><Calendar size={19} /></div>
+                        <span>Due date</span>
+                      </button>
+                      <button className="mobile-action-btn" onClick={() => {}} title="Labels">
+                        <div className="mobile-action-icon-box"><Tag size={19} /></div>
+                        <span>Labels</span>
+                      </button>
+                      <button className="mobile-action-btn" onClick={() => {}} title="Reactions">
+                        <div className="mobile-action-icon-box"><Smile size={19} /></div>
+                        <span>Reactions</span>
+                      </button>
+                    </>
+                  )}
+
+                  {/* TABLE ACTIONS (FULL DESKTOP PARITY) */}
+                  {selectedElement?.element_type === 'table' && (
+                    <>
+                      {/* Title Toggle */}
+                      <button
+                        className={`mobile-action-btn ${selectedElement.content?.show_title ? 'active' : ''}`}
+                        onClick={() => {
+                          onContentChange?.(selectedElement.id, {
+                            ...selectedElement.content,
+                            show_title: !selectedElement.content?.show_title,
+                          });
+                        }}
+                        title="Toggle title"
+                      >
+                        <div className="mobile-action-icon-box">
+                          <Type size={19} />
+                        </div>
+                        <span>Title</span>
+                      </button>
+
+                      {/* Caption Toggle */}
+                      <button
+                        className={`mobile-action-btn ${selectedElement.content?.show_caption ? 'active' : ''}`}
+                        onClick={() => {
+                          onContentChange?.(selectedElement.id, {
+                            ...selectedElement.content,
+                            show_caption: !selectedElement.content?.show_caption,
+                          });
+                        }}
+                        title="Toggle caption"
+                      >
+                        <div className="mobile-action-icon-box">
+                          <AlignLeft size={19} />
+                        </div>
+                        <span>Caption</span>
+                      </button>
+
+                      {/* Add Row Button */}
+                      <button
+                        className="mobile-action-btn"
+                        onClick={() => handleAddTableRow()}
+                        title="Add row"
+                      >
+                        <div className="mobile-action-icon-box">
+                          <Rows size={19} />
+                        </div>
+                        <span>+ Row</span>
+                      </button>
+
+                      {/* Add Column Button */}
+                      <button
+                        className="mobile-action-btn"
+                        onClick={() => handleAddTableColumn()}
+                        title="Add column"
+                      >
+                        <div className="mobile-action-icon-box">
+                          <Columns size={19} />
+                        </div>
+                        <span>+ Col</span>
+                      </button>
+
+                      {/* Labels Button */}
+                      <button className="mobile-action-btn" onClick={() => {}} title="Labels">
+                        <div className="mobile-action-icon-box"><Tag size={19} /></div>
+                        <span>Labels</span>
+                      </button>
+
+                      {/* Reactions Button */}
+                      <button className="mobile-action-btn" onClick={() => {}} title="Reactions">
+                        <div className="mobile-action-icon-box"><Smile size={19} /></div>
+                        <span>Reactions</span>
+                      </button>
+                    </>
+                  )}
+
+                  {/* LINE ACTIONS (FULL DESKTOP PARITY) */}
+                  {selectedElement?.element_type === 'line' && (
+                    <>
+                      {/* Start Arrow */}
+                      <button
+                        className={`mobile-action-btn ${(selectedElement.style?.start_arrow || 'none') === 'arrow' ? 'active' : ''}`}
+                        onClick={() => {
+                          const cur = selectedElement.style?.start_arrow || 'none';
+                          onStyleChange?.(selectedElement.id, {
+                            ...(selectedElement.style || {}),
+                            start_arrow: cur === 'arrow' ? 'none' : 'arrow'
+                          });
+                        }}
+                        title="Toggle Start Arrow"
+                      >
+                        <div className="mobile-action-icon-box">
+                          <ArrowLeft size={19} />
+                        </div>
+                        <span>Start</span>
+                      </button>
+
+                      {/* End Arrow */}
+                      <button
+                        className={`mobile-action-btn ${(selectedElement.style?.end_arrow === undefined || selectedElement.style?.end_arrow === 'arrow') ? 'active' : ''}`}
+                        onClick={() => {
+                          const cur = selectedElement.style?.end_arrow === undefined ? 'arrow' : selectedElement.style?.end_arrow;
+                          onStyleChange?.(selectedElement.id, {
+                            ...(selectedElement.style || {}),
+                            end_arrow: cur === 'arrow' ? 'none' : 'arrow'
+                          });
+                        }}
+                        title="Toggle End Arrow"
+                      >
+                        <div className="mobile-action-icon-box">
+                          <ArrowRight size={19} />
+                        </div>
+                        <span>End</span>
+                      </button>
+
+                      {/* Label Toggle */}
+                      <button
+                        className={`mobile-action-btn ${Boolean(selectedElement.content?.show_label || (selectedElement.content?.label && selectedElement.content?.label.trim().length > 0)) ? 'active' : ''}`}
+                        onClick={() => {
+                          const showLabel = Boolean(selectedElement.content?.show_label || (selectedElement.content?.label && selectedElement.content?.label.trim().length > 0));
+                          const nextShow = !showLabel;
+                          onContentChange?.(selectedElement.id, {
+                            ...(selectedElement.content || {}),
+                            show_label: nextShow,
+                            label: nextShow ? (selectedElement.content?.label || 'Label') : ''
+                          });
+                        }}
+                        title="Toggle Label"
+                      >
+                        <div className="mobile-action-icon-box">
+                          <Tag size={19} />
+                        </div>
+                        <span>Label</span>
+                      </button>
+
+                      {/* Dashed Toggle */}
+                      <button
+                        className={`mobile-action-btn ${Boolean(selectedElement.style?.is_dashed) ? 'active' : ''}`}
+                        onClick={() => {
+                          onStyleChange?.(selectedElement.id, {
+                            ...(selectedElement.style || {}),
+                            is_dashed: !Boolean(selectedElement.style?.is_dashed)
+                          });
+                        }}
+                        title="Toggle Dashed Line"
+                      >
+                        <div className="mobile-action-icon-box">
+                          <svg width="20" height="20" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2.2" strokeDasharray="4 3" strokeLinecap="round">
+                            <line x1="3" y1="15" x2="15" y2="3" />
+                          </svg>
+                        </div>
+                        <span>Dashed</span>
+                      </button>
+
+                      {/* Weight Selector */}
+                      <button
+                        className={`mobile-action-btn ${showLineWeightMenu ? 'active' : ''}`}
+                        onClick={() => {
+                          setShowLineWeightMenu(!showLineWeightMenu);
+                          setShowColorPalette(false);
+                        }}
+                        title="Line weight"
+                      >
+                        <div className="mobile-action-icon-box">
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', alignItems: 'center' }}>
+                            <div style={{ width: '18px', height: `${selectedElement.style?.line_weight || 2}px`, backgroundColor: 'currentColor', borderRadius: '1px' }} />
+                          </div>
+                        </div>
+                        <span>Weight</span>
+                      </button>
+                    </>
+                  )}
+
+                  {/* NESTED BOARD ACTIONS */}
+                  {selectedElement?.element_type === 'nested_board' && (
+                    <>
+                      <button className="mobile-action-btn" onClick={() => onSetIcon?.(selectedElement.id, 'FolderPlus')} title="Board icon">
+                        <div className="mobile-action-icon-box"><Folder size={19} /></div>
+                        <span>Icon</span>
+                      </button>
+                      <button className="mobile-action-btn" onClick={() => onRename?.(selectedElement.id)} title="Rename board">
+                        <div className="mobile-action-icon-box"><Type size={19} /></div>
+                        <span>Rename</span>
+                      </button>
+                    </>
+                  )}
+
+                  {/* IMAGE ACTIONS */}
+                  {selectedElement?.element_type === 'image' && (
+                    <>
+                      <button
+                        className="mobile-action-btn"
+                        onClick={() => imageFileInputRef.current?.click()}
+                        title="Upload or replace image"
+                      >
+                        <div className="mobile-action-icon-box"><Upload size={19} /></div>
+                        <span>Upload</span>
+                      </button>
+                      <button className="mobile-action-btn" onClick={() => onToggleCaption?.(selectedElement.id)} title="Toggle caption">
+                        <div className="mobile-action-icon-box"><Type size={19} /></div>
+                        <span>Caption</span>
+                      </button>
+                    </>
+                  )}
+
+                  {/* LINK ACTIONS */}
+                  {selectedElement?.element_type === 'link' && (
+                    <button className="mobile-action-btn" onClick={() => onToggleCaption?.(selectedElement.id)} title="Toggle caption">
+                      <div className="mobile-action-icon-box"><Type size={19} /></div>
+                      <span>Caption</span>
+                    </button>
+                  )}
+
+                  {/* COLUMN ACTIONS */}
+                  {selectedElement?.element_type === 'column' && (
+                    <button className="mobile-action-btn" onClick={() => onRename?.(selectedElement.id)} title="Rename column">
+                      <div className="mobile-action-icon-box"><Type size={19} /></div>
+                      <span>Title</span>
+                    </button>
+                  )}
+
+                  {/* Comment Action Button */}
+                  {selectedElement && selectedElement.element_type !== 'comment' && (
+                    <button
+                      className="mobile-action-btn"
+                      onClick={() => selectedElement && onAddCommentPin?.(selectedElement.id)}
+                      title="Add comment"
+                    >
+                      <div className="mobile-action-icon-box"><MessageSquarePlus size={19} /></div>
+                      <span>Comment</span>
+                    </button>
+                  )}
+
+                  {/* More ('...') Button -> Opens Context Menu */}
+                  <button
+                    className="mobile-action-btn"
+                    onClick={() => setShowMoreContextMenu(true)}
+                    title="More actions"
+                  >
+                    <div className="mobile-action-icon-box">
+                      <MoreHorizontal size={19} />
+                    </div>
+                    <span>More</span>
+                  </button>
+                </>
+              )}
             </div>
 
-            {/* Right: Done Text Button (Deselects item) */}
+            {/* Right: Done Text Button (Deselects item or cell selection) */}
             <button
               className="mobile-done-btn"
-              onClick={onDeselect}
-              title="Done editing card"
+              onClick={() => {
+                if (isCellSelected) {
+                  onDeselectTableCells?.();
+                } else {
+                  onDeselect();
+                }
+              }}
+              title="Done"
             >
               Done
             </button>

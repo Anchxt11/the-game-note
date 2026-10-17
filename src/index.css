@@ -554,6 +554,16 @@ body, html, #root {
   touch-action: none;
 }
 
+.canvas-viewport.space-pressed,
+.canvas-viewport.space-pressed * {
+  cursor: grab !important;
+}
+
+.canvas-viewport.space-pressed.is-panning,
+.canvas-viewport.space-pressed.is-panning * {
+  cursor: grabbing !important;
+}
+
 .canvas-viewport-grid {
   position: absolute;
   top: 0;
@@ -561,8 +571,11 @@ body, html, #root {
   width: 100%;
   height: 100%;
   pointer-events: none;
-  background-image: radial-gradient(rgba(255, 255, 255, 0.09) 0.85px, transparent 0);
   background-repeat: repeat;
+  image-rendering: auto;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+  will-change: background-position, background-size;
 }
 
 .canvas-plane {
@@ -574,6 +587,21 @@ body, html, #root {
   transform-origin: 0 0;
   pointer-events: auto;
   touch-action: none;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: geometricPrecision;
+  image-rendering: auto;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+}
+
+.milanote-lines-layer,
+.milanote-lines-interactive-overlay,
+.milanote-lines-layer path,
+.milanote-lines-interactive-overlay path,
+.line-handle-circle {
+  shape-rendering: geometricPrecision !important;
+  text-rendering: geometricPrecision !important;
 }
 
 /* FLOATING TOP RIGHT "0 UNSORTED" PILL BUTTON */
@@ -626,8 +654,10 @@ body, html, #root {
   transition: none !important;
   box-shadow: none !important;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
   backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
 }
 
 .milanote-card.selected {
@@ -635,12 +665,34 @@ body, html, #root {
   box-shadow: none !important;
 }
 
-.milanote-card.dragging {
+.milanote-card.dragging,
+.board-card-vertical.dragging,
+.column-card.dragging {
   cursor: grabbing !important;
   z-index: 99999 !important;
-  border: 1.5px solid rgba(255, 255, 255, 0.7) !important;
-  opacity: 0.85;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25) !important;
+  border: 1.5px solid #ffffff !important;
+  opacity: 1 !important;
+  box-shadow: 0 14px 28px rgba(0, 0, 0, 0.5), 0 3px 8px rgba(0, 0, 0, 0.3) !important;
+  will-change: transform;
+  transform-origin: center center !important;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+
+.milanote-card.drag-settle-animation,
+.board-card-vertical.drag-settle-animation,
+.column-card.drag-settle-animation {
+  transition: transform 0.22s cubic-bezier(0.18, 0.89, 0.32, 1.15), box-shadow 0.22s ease-out !important;
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+
+.board-card-vertical,
+.column-card {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
 }
 
 /* QUICK-CONNECT LINE DRAG HANDLE (TOP-RIGHT CIRCLE ON SELECTED CARDS) */
@@ -648,8 +700,8 @@ body, html, #root {
   position: absolute;
   right: -6px;
   top: -6px;
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
   background: #ffffff;
   border: 1.5px solid #232428;
   border-radius: 50%;
@@ -657,6 +709,7 @@ body, html, #root {
   z-index: 9999;
   transition: transform 0.15s ease, box-shadow 0.15s ease;
   pointer-events: auto;
+  touch-action: none;
 }
 
 .card-quick-connect-handle:hover {
@@ -670,8 +723,8 @@ body, html, #root {
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   pointer-events: auto;
 }
 
@@ -680,8 +733,8 @@ body, html, #root {
   position: absolute;
   right: 2px;
   bottom: 2px;
-  width: 14px;
-  height: 14px;
+  width: 20px;
+  height: 20px;
   background: linear-gradient(
     -45deg,
     #73747d 1px,
@@ -699,6 +752,9 @@ body, html, #root {
   cursor: nwse-resize;
   pointer-events: auto;
   z-index: 200;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .milanote-card:hover .card-diagonal-grip-se,
@@ -709,11 +765,14 @@ body, html, #root {
 .card-diagonal-grip-se::after {
   content: '';
   position: absolute;
-  right: -8px;
-  bottom: -8px;
-  width: 36px;
-  height: 36px;
+  right: -14px;
+  bottom: -14px;
+  width: 54px;
+  height: 54px;
   pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .card-body {
@@ -722,9 +781,16 @@ body, html, #root {
   flex-direction: column;
   width: 100%;
   height: 100%;
+  min-height: 0;
+  box-sizing: border-box;
 }
 
-.milanote-card.note-card-wrapper .card-body,
+.milanote-card.note-card-wrapper .card-body {
+  padding: 17px 16px !important;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .milanote-card.task-list-card-wrapper .card-body,
 .milanote-card.link-card-wrapper.link-empty-wrapper .card-body {
   padding: 17px 16px !important;
@@ -732,6 +798,9 @@ body, html, #root {
 
 .milanote-card.link-card-wrapper:not(.link-empty-wrapper) .card-body {
   padding: 0 !important;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 /* RICH TEXT NOTE EDITOR */
@@ -1204,12 +1273,19 @@ body, html, #root {
   padding: 2px 4px;
 }
 
-.checklist-item.dragging-task {
-  background: #383a40;
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.6);
-  border-radius: 0 !important;
-  padding: 6px 8px;
+.checklist-item.dragging-task,
+.checklist-item.dragging-task-portal {
+  background: #25272e;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.65), 0 2px 6px rgba(0, 0, 0, 0.4);
+  border-radius: 4px !important;
+  padding: 4px 8px;
   cursor: grabbing !important;
+  user-select: none !important;
+}
+
+.checklist-item.checklist-item-drag-placeholder {
+  opacity: 0.25 !important;
+  pointer-events: none !important;
 }
 
 /* TO-DO CHECKLIST DRAG & DROP INSERTION INDICATOR */
@@ -1301,6 +1377,8 @@ body, html, #root {
   padding: 2px;
   cursor: grab;
   transition: color 0.15s ease;
+  touch-action: none;
+  user-select: none;
 }
 
 .checklist-item:hover .checklist-task-drag-handle {
@@ -1446,6 +1524,17 @@ body, html, #root {
   width: 7px;
   cursor: col-resize;
   z-index: 30;
+  touch-action: none;
+}
+.col-resize-handle::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 28px;
+  pointer-events: auto;
 }
 .col-resize-handle:hover,
 .col-resize-handle:active {
@@ -1462,6 +1551,17 @@ body, html, #root {
   height: 7px;
   cursor: row-resize;
   z-index: 30;
+  touch-action: none;
+}
+.row-resize-handle::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 28px;
+  pointer-events: auto;
 }
 .row-resize-handle:hover,
 .row-resize-handle:active {
@@ -1593,13 +1693,10 @@ body, html, #root {
 }
 
 /* RESIZE HANDLES */
-.resize-handle-se, .resize-handle-e {
+.resize-handle-se {
   position: absolute;
   background: transparent;
   z-index: 100;
-}
-
-.resize-handle-se {
   right: 0;
   bottom: 0;
   width: 14px;
@@ -1614,24 +1711,6 @@ body, html, #root {
   bottom: -8px;
   width: 36px;
   height: 36px;
-  pointer-events: auto;
-}
-
-.resize-handle-e {
-  right: 0;
-  top: 0;
-  width: 8px;
-  height: 100%;
-  cursor: ew-resize;
-}
-
-.resize-handle-e::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  right: -10px;
-  width: 28px;
-  height: 100%;
   pointer-events: auto;
 }
 
@@ -1667,8 +1746,9 @@ body, html, #root {
   position: relative;
   width: 100%;
   aspect-ratio: 16 / 9;
-  min-height: 160px;
-  max-height: 480px;
+  min-height: 0;
+  max-height: none;
+  flex-shrink: 0;
   overflow: hidden;
   background: #1a1b1e;
   display: flex;
@@ -1977,7 +2057,7 @@ body, html, #root {
 }
 
 .milanote-card.image-card-wrapper.dragging .image-photo-wrap img {
-  opacity: 0.94;
+  opacity: 1;
   box-shadow: 0 16px 32px rgba(0, 0, 0, 0.8) !important;
 }
 
@@ -3819,10 +3899,9 @@ body, html, #root {
   position: absolute;
   bottom: 0;
   left: 0;
-  right: 6px;
-  height: 6px;
+  right: 0;
+  height: 8px;
   background: transparent;
-  border-radius: 0 !important;
   z-index: 9999;
   cursor: pointer;
   user-select: none;
@@ -3830,17 +3909,16 @@ body, html, #root {
 }
 
 .canvas-scrollbar-h:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .canvas-scrollbar-v {
   position: absolute;
   top: 0;
   right: 0;
-  bottom: 6px;
-  width: 6px;
+  bottom: 0;
+  width: 8px;
   background: transparent;
-  border-radius: 0 !important;
   z-index: 9999;
   cursor: pointer;
   user-select: none;
@@ -3848,19 +3926,19 @@ body, html, #root {
 }
 
 .canvas-scrollbar-v:hover {
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .canvas-scrollbar-thumb {
   position: absolute;
-  background: rgba(255, 255, 255, 0.16);
-  border-radius: 0 !important;
+  background: rgba(255, 255, 255, 0.22);
+  border-radius: 4px;
   transition: background 0.15s ease;
 }
 
 .canvas-scrollbar-thumb:hover,
 .canvas-scrollbar-thumb.dragging {
-  background: rgba(255, 255, 255, 0.38);
+  background: rgba(255, 255, 255, 0.45);
 }
 
 /* Global scrollbars for drawers and panels - subtle and non-rounded */
@@ -3996,25 +4074,7 @@ body, html, #root {
    TASK 2.10: FLOATING TOUCH SELECTION ACTION BAR
    ========================================================================== */
 .touch-selection-action-bar {
-  position: fixed;
-  bottom: 24px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 100000;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 10px;
-  background: rgba(24, 26, 32, 0.96);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 14px;
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.05);
-  animation: slideUpActionBar 0.2s cubic-bezier(0.16, 1, 0.3, 1);
-  max-width: calc(100vw - 32px);
-  overflow-x: auto;
-  user-select: none;
+  display: none !important;
 }
 
 @keyframes slideUpActionBar {
@@ -4382,13 +4442,7 @@ body, html, #root {
 
 @media (max-width: 640px) {
   .mobile-unsorted-backdrop {
-    display: block !important;
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.55);
-    z-index: 99990;
-    backdrop-filter: blur(2px);
-    -webkit-backdrop-filter: blur(2px);
+    display: none !important;
   }
 
   .unsorted-drawer {
@@ -4405,7 +4459,7 @@ body, html, #root {
     background-color: #222224 !important;
     border: 1px solid rgba(255, 255, 255, 0.1) !important;
     border-bottom: none !important;
-    box-shadow: 0 -8px 36px rgba(0, 0, 0, 0.75) !important;
+    box-shadow: none !important;
     z-index: 99995 !important;
     animation: slideUpBar 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
   }
@@ -4416,6 +4470,38 @@ body, html, #root {
     border-radius: 18px 18px 0 0 !important;
     border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
     padding: 0 18px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    position: relative !important;
+  }
+
+  .unsorted-header-left {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+  }
+
+  .unsorted-header-title {
+    font-size: 16px !important;
+    font-weight: 600 !important;
+    color: #ffffff !important;
+    text-align: center !important;
+  }
+
+  .unsorted-drawer-header .drawer-close-btn {
+    position: absolute !important;
+    right: 16px !important;
+    top: 50% !important;
+    transform: translateY(-50%) !important;
+    color: #b0b0b8 !important;
+    font-size: 15px !important;
+    font-weight: 500 !important;
+    padding: 6px 10px !important;
+  }
+
+  .unsorted-drawer-header .drawer-close-btn svg {
+    display: none !important;
   }
 
   .drawer-mobile-back-btn,
@@ -4681,56 +4767,135 @@ body, html, #root {
 .mobile-unsorted-floating-pill {
   display: none;
   position: fixed;
-  top: max(16px, var(--safe-area-top));
-  right: 16px;
+  top: calc(var(--safe-area-top, 0px) + 12px);
+  right: 14px;
   z-index: 99990;
-  background: rgba(32, 32, 35, 0.88);
+  background: rgba(30, 30, 32, 0.72);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
-  padding: 6px 14px;
+  border-radius: 6px;
+  padding: 5px 12px;
   color: #c8c8cf;
   font-size: 13px;
-  font-weight: 600;
   cursor: pointer;
   touch-action: manipulation;
   transition: all 0.15s ease;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  box-shadow: none;
+  align-items: center;
+  gap: 5px;
 }
 
 .mobile-unsorted-floating-pill:active {
-  transform: scale(0.95);
-  background: rgba(45, 45, 50, 0.95);
-  color: #ffffff;
+  transform: scale(0.96);
+  background: rgba(45, 45, 48, 0.9);
 }
 
-/* Floating Mobile Top Back Button (When inside sub-board) */
-.mobile-floating-back-btn {
+.mobile-unsorted-floating-pill.under-topbar {
+  top: calc(var(--safe-area-top, 0px) + 52px + 12px) !important;
+  right: 14px !important;
+}
+
+.mobile-unsorted-pill-count {
+  font-weight: 700;
+  color: #ffffff;
+  font-size: 13px;
+}
+
+.mobile-unsorted-pill-text {
+  font-weight: 500;
+  color: #9c9ca4;
+  font-size: 13px;
+}
+
+/* Native Milanote Mobile Board Top Bar (Image 2) */
+.mobile-board-topbar {
   display: none;
   position: fixed;
-  top: max(16px, var(--safe-area-top));
-  left: 16px;
-  z-index: 99990;
-  background: rgba(32, 32, 35, 0.88);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
-  padding: 6px 12px;
-  color: #ffffff;
-  display: flex;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: calc(var(--safe-area-top, 0px) + 52px);
+  padding-top: var(--safe-area-top, 0px);
+  background: #1c1c1e;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  z-index: 99995;
   align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  touch-action: manipulation;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  justify-content: space-between;
+  padding-left: 8px;
+  padding-right: 14px;
+  box-sizing: border-box;
 }
 
-.mobile-floating-back-btn:active {
-  transform: scale(0.95);
+.mobile-board-back-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #ffffff;
+  border-radius: 50%;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background-color 0.15s ease;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+.mobile-board-back-icon-btn:active {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.mobile-board-title-container {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 0 8px;
+}
+
+.mobile-board-header-title {
+  background: transparent;
+  border: none;
+  outline: none;
+  text-align: center;
+  font-family: Georgia, 'Times New Roman', serif;
+  font-size: 19px;
+  font-weight: 700;
+  color: #ffffff;
+  width: 100%;
+  padding: 0;
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mobile-board-share-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  background: rgba(255, 255, 255, 0.12);
+  border: none;
+  outline: none;
+  border-radius: 50%;
+  color: #ffffff;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+.mobile-board-share-btn:active {
+  background: rgba(255, 255, 255, 0.24);
+  transform: scale(0.94);
 }
 
 /* Status Bar Filler Band (Matching Image 1) */
@@ -4745,6 +4910,18 @@ body, html, #root {
   z-index: 99998;
   pointer-events: none;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+/* Tablet Status Bar Padding Filler */
+.tablet-status-bar-filler {
+  display: block;
+  width: 100%;
+  height: 28px;
+  height: max(env(safe-area-inset-top, 0px), 28px);
+  background-color: var(--milanote-topbar-bg, rgb(51, 51, 51));
+  flex-shrink: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  z-index: 99999;
 }
 
 /* Floating Tool Drag Preview Follower */
@@ -4969,7 +5146,10 @@ body, html, #root {
   gap: 5px;
   cursor: pointer;
   flex-shrink: 0;
-  touch-action: manipulation;
+  touch-action: pan-x;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
   transition: transform 0.12s ease;
 }
 
@@ -5024,7 +5204,17 @@ body, html, #root {
 .mobile-selection-actions-left {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  max-width: calc(100vw - 84px);
+  padding: 4px 0;
+}
+
+.mobile-selection-actions-left::-webkit-scrollbar {
+  display: none;
 }
 
 .mobile-action-btn {
@@ -5035,9 +5225,20 @@ body, html, #root {
   align-items: center;
   gap: 4px;
   min-width: 44px;
+  flex-shrink: 0;
   cursor: pointer;
   touch-action: manipulation;
   color: #d0d0d5;
+}
+
+.mobile-action-btn.active .mobile-action-icon-box {
+  background: rgba(59, 130, 246, 0.25);
+  border-color: #3b82f6;
+  color: #60a5fa;
+}
+
+.mobile-action-btn.active span {
+  color: #60a5fa;
 }
 
 .mobile-action-btn span {
@@ -5331,30 +5532,65 @@ body, html, #root {
   background: conic-gradient(red, yellow, lime, aqua, blue, magenta, red);
 }
 
-/* Media Query Trigger for Mobile Phone (< 640px) */
-@media (max-width: 640px) {
-  .milanote-topbar,
-  .milanote-secondary-topbar,
-  .milanote-toolbar,
-  .milanote-sub-sidebar,
-  .mobile-tool-fab-container,
-  .touch-selection-action-bar,
-  .unsorted-pill-btn {
+/* TABLET MODE OVERRIDES (Guarantees desktop topbar, toolbar & status filler on all tablets) */
+body.device-tablet .tablet-status-bar-filler {
+  display: block !important;
+  width: 100%;
+  height: 28px;
+  height: max(env(safe-area-inset-top, 0px), 28px);
+  background-color: var(--milanote-topbar-bg, rgb(51, 51, 51));
+  flex-shrink: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  z-index: 99999;
+}
+
+body.device-tablet .milanote-topbar,
+body.device-tablet .milanote-secondary-topbar,
+body.device-tablet .milanote-toolbar,
+body.device-tablet .milanote-sub-sidebar,
+body.device-tablet .unsorted-pill-btn {
+  display: flex !important;
+}
+
+body.device-tablet .mobile-main-bottom-bar,
+body.device-tablet .mobile-board-topbar,
+body.device-tablet .mobile-status-bar-filler,
+body.device-tablet .mobile-context-sheet-backdrop {
+  display: none !important;
+}
+
+/* Media Query Trigger for Mobile Phone (< 500px) */
+@media (max-width: 500px) {
+  body:not(.device-tablet) .milanote-topbar,
+  body:not(.device-tablet) .milanote-secondary-topbar,
+  body:not(.device-tablet) .milanote-toolbar,
+  body:not(.device-tablet) .milanote-sub-sidebar,
+  body:not(.device-tablet) .mobile-tool-fab-container,
+  body:not(.device-tablet) .touch-selection-action-bar,
+  body:not(.device-tablet) .unsorted-pill-btn {
     display: none !important;
   }
 
-  .mobile-status-bar-filler {
+  body:not(.device-tablet) .mobile-status-bar-filler {
     display: block !important;
   }
 
-  .mobile-main-bottom-bar,
-  .mobile-floating-back-btn {
+  body:not(.device-tablet) .mobile-main-bottom-bar {
+    display: flex !important;
+  }
+
+  body:not(.device-tablet) .mobile-board-topbar {
     display: flex !important;
   }
 
   .mobile-unsorted-floating-pill {
-    display: flex !important;
-    top: calc(var(--safe-area-top, 44px) + 12px) !important;
+    display: inline-flex !important;
+    top: calc(var(--safe-area-top, 0px) + 12px) !important;
+    right: 14px !important;
+  }
+
+  .mobile-unsorted-floating-pill.under-topbar {
+    top: calc(var(--safe-area-top, 0px) + 52px + 12px) !important;
     right: 14px !important;
   }
 
@@ -5390,6 +5626,386 @@ body, html, #root {
   to {
     opacity: 1;
   }
+}
+
+/* MOBILE DUE DATE DRAWER (FULL DESKTOP PARITY) */
+.mobile-date-drawer {
+  position: fixed;
+  bottom: calc(66px + var(--safe-area-bottom, 0px));
+  left: 12px;
+  right: 12px;
+  background: #252528;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 14px;
+  padding: 14px 16px;
+  box-shadow: 0 -6px 28px rgba(0, 0, 0, 0.65);
+  z-index: 99999;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: slideUpBar 0.16s ease-out;
+}
+
+.mobile-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 700;
+  color: #c0c4cc;
+}
+
+.mobile-date-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: #3b82f6;
+  background: rgba(59, 130, 246, 0.18);
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+}
+
+.mobile-date-shortcuts-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mobile-date-shortcut-btn {
+  flex: 1;
+  background: #323236;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  color: #e5e7eb;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.mobile-date-shortcut-btn:active {
+  background: #3e3e44;
+  transform: scale(0.96);
+}
+
+.mobile-date-offset {
+  font-size: 10px;
+  color: #9ca3af;
+  font-weight: 500;
+}
+
+.mobile-date-custom-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mobile-date-custom-section label {
+  font-size: 11px;
+  color: #9ca3af;
+  font-weight: 600;
+}
+
+.mobile-date-native-input {
+  width: 100%;
+  background: #323236;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 8px;
+  color: #ffffff;
+  padding: 10px 12px;
+  font-size: 14px;
+  font-weight: 500;
+  outline: none;
+  box-sizing: border-box;
+}
+
+.mobile-date-native-input:focus {
+  border-color: #3b82f6;
+}
+
+.mobile-date-clear-btn {
+  width: 100%;
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #f87171;
+  border-radius: 8px;
+  padding: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.mobile-date-clear-btn:active {
+  background: rgba(239, 68, 68, 0.22);
+}
+
+/* MOBILE LINE WEIGHT DRAWER (FULL DESKTOP PARITY) */
+.mobile-line-weight-drawer {
+  position: fixed;
+  bottom: calc(66px + var(--safe-area-bottom, 0px));
+  left: 12px;
+  right: 12px;
+  background: #252528;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 14px;
+  padding: 14px 16px;
+  box-shadow: 0 -6px 28px rgba(0, 0, 0, 0.65);
+  z-index: 99999;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: slideUpBar 0.16s ease-out;
+}
+
+.mobile-line-weight-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  gap: 10px;
+}
+
+.mobile-weight-option-btn {
+  flex: 1;
+  background: #323236;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  padding: 12px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  color: #e5e7eb;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.mobile-weight-option-btn.active {
+  border-color: #3b82f6;
+  background: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
+}
+
+.mobile-weight-option-btn span {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* MOBILE CELL MENU DRAWER (FULL DESKTOP PARITY) */
+.mobile-cell-menu-drawer {
+  position: fixed;
+  bottom: calc(66px + var(--safe-area-bottom, 0px));
+  left: 12px;
+  right: 12px;
+  background: #252528;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 14px;
+  padding: 14px 16px;
+  box-shadow: 0 -6px 28px rgba(0, 0, 0, 0.65);
+  z-index: 99999;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: slideUpBar 0.16s ease-out;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.mobile-cell-type-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mobile-cell-type-btn {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #303034;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: #e5e7eb;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  touch-action: manipulation;
+  gap: 12px;
+}
+
+.mobile-cell-type-btn.active {
+  background: rgba(59, 130, 246, 0.18);
+  border-color: #3b82f6;
+  color: #ffffff;
+}
+
+.mobile-cell-type-icon {
+  width: 24px;
+  text-align: center;
+  font-weight: 700;
+  color: #93c5fd;
+}
+
+.mobile-cell-type-label {
+  flex: 1;
+  text-align: left;
+}
+
+.mobile-cell-align-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mobile-cell-align-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mobile-cell-align-btn {
+  flex: 1;
+  background: #323236;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #e5e7eb;
+  cursor: pointer;
+}
+
+.mobile-cell-align-btn.active {
+  background: rgba(59, 130, 246, 0.22);
+  border-color: #3b82f6;
+  color: #60a5fa;
+}
+
+/* ==========================================================================
+   FLOATING ZOOM LEVEL OSD (ON-SCREEN DISPLAY) PILL
+   ========================================================================== */
+
+.canvas-zoom-osd {
+  position: absolute;
+  bottom: 28px;
+  left: 50%;
+  transform: translateX(-50%) translateY(10px) scale(0.96);
+  background: rgba(18, 20, 26, 0.88);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: #f1f3f7;
+  padding: 6px 14px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.38);
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0;
+  transition: opacity 0.25s cubic-bezier(0.16, 1, 0.3, 1), transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+}
+
+.canvas-zoom-osd.visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0) scale(1);
+}
+
+.canvas-zoom-osd-val {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 640px) {
+  .canvas-zoom-osd {
+    bottom: 84px;
+    font-size: 12px;
+    padding: 5px 12px;
+  }
+}
+
+/* ==========================================================================
+   IMAGE CARD UPLOAD PLACEHOLDER & REPLACE OVERLAY
+   ========================================================================== */
+
+.image-card-empty-placeholder {
+  width: 100%;
+  height: 200px;
+  background: #252528;
+  border: 2px dashed rgba(255, 255, 255, 0.22);
+  border-radius: 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  touch-action: manipulation;
+  transition: border-color 0.15s, background-color 0.15s;
+}
+
+.image-card-empty-placeholder:hover,
+.image-card-empty-placeholder:active {
+  background: #2d2d32;
+  border-color: #3b82f6;
+}
+
+.image-placeholder-icon-box {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.image-placeholder-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #f1f3f7;
+}
+
+.image-placeholder-sub {
+  font-size: 11.5px;
+  color: #9ca3af;
+}
+
+.image-card-replace-overlay-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: rgba(20, 20, 24, 0.82);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  z-index: 25;
+  touch-action: manipulation;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.45);
+}
+
+.image-card-replace-overlay-btn:hover,
+.image-card-replace-overlay-btn:active {
+  background: rgba(35, 35, 42, 0.95);
+  border-color: #3b82f6;
+  color: #60a5fa;
 }
 
 
