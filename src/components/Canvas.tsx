@@ -950,6 +950,7 @@ export const Canvas: React.FC<CanvasProps> = ({
   const containerRef = useRef<HTMLDivElement>(null);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
+  const isPanningRef = useRef(false);
   const [isTouchMultiSelectMode, setIsTouchMultiSelectMode] = useState(false);
   const [showTouchColorPalette, setShowTouchColorPalette] = useState(false);
   const panStartRef = useRef({ x: 0, y: 0, startPanX: 0, startPanY: 0 });
@@ -1154,7 +1155,7 @@ export const Canvas: React.FC<CanvasProps> = ({
     if (getDeviceCategory() === 'phone') return true;
     const native = e.nativeEvent as any;
     if (e.button === 2) return false;
-    if (native?.pointerType === 'touch') return true;
+    if (native?.pointerType === 'touch' || native?.pointerType === 'pen') return true;
     if (isTouchSelectingRef.current) return true;
     if (pointersRef.current.size === 1) return true;
     return false;
@@ -1783,7 +1784,24 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
     if (activeInlineComment) setActiveInlineComment(null);
     const target = e.target as HTMLElement;
-    const isCanvasBg = target === containerRef.current || target.classList.contains('canvas-viewport') || target.classList.contains('canvas-plane') || target.classList.contains('canvas-viewport-grid');
+    const isCanvasBg = target === containerRef.current || 
+      target.classList.contains('canvas-viewport') || 
+      target.classList.contains('canvas-plane') || 
+      target.classList.contains('canvas-viewport-grid') || 
+      (!target.closest('[id^="milanote-el-"]') && 
+       !target.closest('.canvas-scrollbar-h') && 
+       !target.closest('.canvas-scrollbar-v') && 
+       !target.closest('.unsorted-drawer') && 
+       !target.closest('.canvas-zoom-osd') && 
+       !target.closest('.canvas-tool-placement-banner') && 
+       !target.closest('.touch-selection-action-bar') && 
+       !target.closest('.mobile-main-bottom-bar') && 
+       !target.closest('.floating-toolbar-wrapper') && 
+       !target.closest('.board-breadcrumbs-bar') && 
+       !target.closest('.inline-comment-bubble') && 
+       !target.closest('.table-row-indices-absolute') && 
+       !target.closest('.table-header-cell') && 
+       Boolean(containerRef.current?.contains(target)));
 
     // Tap-to-place active tool support (Task 2.8)
     if (activeTool && activeTool !== 'select' && !target.closest('.canvas-tool-placement-banner') && !target.closest('.touch-selection-action-bar') && !target.closest('.mobile-main-bottom-bar')) {
@@ -1826,7 +1844,30 @@ export const Canvas: React.FC<CanvasProps> = ({
       });
     }
 
-    if (ptr.pointerType === 'touch') {
+    const isPen = ptr.pointerType === 'pen';
+    const isTouch = ptr.pointerType === 'touch';
+
+    if (isTouch || isPen) {
+      // 1. Stylus Barrel Button pressed -> immediate marquee selection
+      const isPenBarrel = isPen && (e.button === 2 || e.button === 5 || (e.buttons & 2) !== 0);
+      if (isPenBarrel && isCanvasBg) {
+        e.preventDefault();
+        onSelectElement(null);
+        onSetEditingElement(null);
+        if (onMultiSelect) onMultiSelect([]);
+        onCanvasClick?.();
+        selectionInitialIdsRef.current = [];
+        lastDispatchedSelectedRef.current = [];
+        const pos = screenToCanvas(e.clientX, e.clientY);
+        const newBox = { startX: pos.x, startY: pos.y, currentX: pos.x, currentY: pos.y };
+        setSelectionBox(newBox);
+        selectionRef.current = newBox;
+        isTouchSelectingRef.current = true;
+        isPanningRef.current = false;
+        setIsPanning(false);
+        return;
+      }
+
       if (pointersRef.current.size === 1 && isCanvasBg) {
         onSelectElement(null);
         onSetEditingElement(null);
@@ -1846,8 +1887,10 @@ export const Canvas: React.FC<CanvasProps> = ({
             touchHoldTimerRef.current = null;
           }
           isTouchSelectingRef.current = true;
+          isPanningRef.current = false;
           setIsPanning(false);
           selectionInitialIdsRef.current = [];
+          lastDispatchedSelectedRef.current = [];
           const pos = screenToCanvas(e.clientX, e.clientY);
           const newBox = { startX: pos.x, startY: pos.y, currentX: pos.x, currentY: pos.y };
           setSelectionBox(newBox);
@@ -1858,18 +1901,23 @@ export const Canvas: React.FC<CanvasProps> = ({
           return;
         }
 
-        // Set up pan start reference
+        // Set up pan start reference (stylus or finger dragging will pan the canvas)
         panStartRef.current = { x: e.clientX, y: e.clientY, startPanX: pan.x, startPanY: pan.y };
         touchHoldStartPosRef.current = { clientX: e.clientX, clientY: e.clientY };
         isTouchSelectingRef.current = false;
 
-        // Long-press hold timer (200ms) to trigger marquee selection
+        // Long-press hold timer (350ms) to trigger marquee selection
+        // 350ms gives plenty of time to swipe/drag without accidental selection,
+        // while activating selection box predictably when held in place.
+        const HOLD_DURATION_MS = 350;
         if (touchHoldTimerRef.current) clearTimeout(touchHoldTimerRef.current);
         touchHoldTimerRef.current = setTimeout(() => {
           touchHoldTimerRef.current = null;
           isTouchSelectingRef.current = true;
+          isPanningRef.current = false;
           setIsPanning(false);
           selectionInitialIdsRef.current = [];
+          lastDispatchedSelectedRef.current = [];
           const pos = screenToCanvas(e.clientX, e.clientY);
           const newBox = { startX: pos.x, startY: pos.y, currentX: pos.x, currentY: pos.y };
           setSelectionBox(newBox);
@@ -1877,7 +1925,7 @@ export const Canvas: React.FC<CanvasProps> = ({
           if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
             try { navigator.vibrate(30); } catch (_) {}
           }
-        }, 200);
+        }, HOLD_DURATION_MS);
 
         return;
       }
@@ -1893,6 +1941,7 @@ export const Canvas: React.FC<CanvasProps> = ({
           setSelectionBox(null);
         }
         // Two fingers: Pinch-to-zoom & two-finger tap detection
+        isPanningRef.current = false;
         setIsPanning(false);
         const pts = Array.from(pointersRef.current.values());
         if (containerRef.current) {
@@ -1923,22 +1972,11 @@ export const Canvas: React.FC<CanvasProps> = ({
       }
     }
 
-    if (ptr.pointerType === 'pen' && isCanvasBg) {
-      onSelectElement(null);
-      onSetEditingElement(null);
-      if (onMultiSelect) onMultiSelect([]);
-      onCanvasClick?.();
-      const pos = screenToCanvas(e.clientX, e.clientY);
-      const newBox = { startX: pos.x, startY: pos.y, currentX: pos.x, currentY: pos.y };
-      setSelectionBox(newBox);
-      selectionRef.current = newBox;
-      return;
-    }
-
     if (isCanvasBg) {
       // 1. Middle-click or Spacebar + Left Click = PANNING
       if (e.button === 1 || e.buttons === 4 || (isSpacePressedRef.current && e.button === 0)) {
         e.preventDefault();
+        isPanningRef.current = true;
         setIsPanning(true);
         panStartRef.current = { x: e.clientX, y: e.clientY, startPanX: pan.x, startPanY: pan.y };
         return;
@@ -2279,7 +2317,7 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
 
     const isMouseRelease = (!ptr.pointerType || ptr.pointerType === 'mouse') && e.buttons === 0;
-    if (isMouseRelease && (selectionRef.current || dragRef.current || lineHandleDragRef.current || headerResizeRef.current || isPanning || scrollbarDragRef.current)) {
+    if (isMouseRelease && (selectionRef.current || dragRef.current || lineHandleDragRef.current || headerResizeRef.current || isPanning || isPanningRef.current || scrollbarDragRef.current)) {
       mouseUpRef.current(e);
       return;
     }
@@ -2307,18 +2345,21 @@ export const Canvas: React.FC<CanvasProps> = ({
       }
       return;
     }
+    let currentlyPanning = isPanningRef.current || isPanning;
     if (touchHoldTimerRef.current) {
       const dist = Math.hypot(
         e.clientX - (touchHoldStartPosRef.current?.clientX || e.clientX),
         e.clientY - (touchHoldStartPosRef.current?.clientY || e.clientY)
       );
-      if (dist > 8) {
+      if (dist > 10) {
         clearTimeout(touchHoldTimerRef.current);
         touchHoldTimerRef.current = null;
+        isPanningRef.current = true;
         setIsPanning(true);
+        currentlyPanning = true;
       }
     }
-    if (isPanning) {
+    if (currentlyPanning && panStartRef.current) {
       const dx = e.clientX - panStartRef.current.x;
       const dy = e.clientY - panStartRef.current.y;
       setPan(clampPan(panStartRef.current.startPanX + dx, panStartRef.current.startPanY + dy));
@@ -2816,7 +2857,7 @@ export const Canvas: React.FC<CanvasProps> = ({
       clearTimeout(touchHoldTimerRef.current);
       touchHoldTimerRef.current = null;
     }
-    if (ptr.pointerType === 'touch') {
+    if (ptr.pointerType === 'touch' || ptr.pointerType === 'pen') {
       lastTouchTapRef.current = { time: Date.now(), x: (e as any).clientX || 0, y: (e as any).clientY || 0 };
     }
     isTouchSelectingRef.current = false;
@@ -2901,7 +2942,8 @@ export const Canvas: React.FC<CanvasProps> = ({
       setHoveredLineTarget(null);
       return;
     }
-    if (isPanning) {
+    if (isPanning || isPanningRef.current) {
+      isPanningRef.current = false;
       setIsPanning(false);
     }
     if (headerResizeRef.current || headerResize) {
@@ -3213,7 +3255,7 @@ export const Canvas: React.FC<CanvasProps> = ({
 
   useEffect(() => {
     const handleWindowPointerDownCapture = (e: PointerEvent) => {
-      if (e.pointerType === 'touch') {
+      if (e.pointerType === 'touch' || e.pointerType === 'pen') {
         pointersRef.current.set(e.pointerId, {
           clientX: e.clientX,
           clientY: e.clientY,
@@ -3231,6 +3273,7 @@ export const Canvas: React.FC<CanvasProps> = ({
             selectionRef.current = null;
             setSelectionBox(null);
           }
+          isPanningRef.current = false;
           setIsPanning(false);
         }
       }
@@ -3325,7 +3368,7 @@ export const Canvas: React.FC<CanvasProps> = ({
     };
 
     const onTouchMove = (e: TouchEvent) => {
-      if (dragRef.current || selectionRef.current || isPanning || isTouchSelectingRef.current || lineHandleDragRef.current || scrollbarDragRef.current) {
+      if (dragRef.current || selectionRef.current || isPanning || isPanningRef.current || isTouchSelectingRef.current || lineHandleDragRef.current || scrollbarDragRef.current) {
         if (e.cancelable) e.preventDefault();
       }
       if (e.touches.length >= 2 && pinchStateRef.current && containerRef.current) {
@@ -3504,6 +3547,7 @@ export const Canvas: React.FC<CanvasProps> = ({
     // Spacebar + Left click for panning (works over cards, notes, columns, lines)
     if (isSpacePressedRef.current && e.button === 0) {
       e.preventDefault();
+      isPanningRef.current = true;
       setIsPanning(true);
       panStartRef.current = { x: e.clientX, y: e.clientY, startPanX: pan.x, startPanY: pan.y };
       return;
@@ -3512,6 +3556,7 @@ export const Canvas: React.FC<CanvasProps> = ({
     // Middle-click also pans from anywhere
     if (e.button === 1 || e.buttons === 4) {
       e.preventDefault();
+      isPanningRef.current = true;
       setIsPanning(true);
       panStartRef.current = { x: e.clientX, y: e.clientY, startPanX: pan.x, startPanY: pan.y };
       return;
@@ -5126,12 +5171,14 @@ export const Canvas: React.FC<CanvasProps> = ({
                   onMouseDown={(evt) => {
                     if (isSpacePressedRef.current && evt.button === 0) {
                       evt.preventDefault();
+                      isPanningRef.current = true;
                       setIsPanning(true);
                       panStartRef.current = { x: evt.clientX, y: evt.clientY, startPanX: pan.x, startPanY: pan.y };
                       return;
                     }
                     if (evt.button === 1 || evt.buttons === 4) {
                       evt.preventDefault();
+                      isPanningRef.current = true;
                       setIsPanning(true);
                       panStartRef.current = { x: evt.clientX, y: evt.clientY, startPanX: pan.x, startPanY: pan.y };
                       return;
@@ -5308,12 +5355,14 @@ export const Canvas: React.FC<CanvasProps> = ({
                   onMouseDown={(evt) => {
                     if (isSpacePressedRef.current && evt.button === 0) {
                       evt.preventDefault();
+                      isPanningRef.current = true;
                       setIsPanning(true);
                       panStartRef.current = { x: evt.clientX, y: evt.clientY, startPanX: pan.x, startPanY: pan.y };
                       return;
                     }
                     if (evt.button === 1 || evt.buttons === 4) {
                       evt.preventDefault();
+                      isPanningRef.current = true;
                       setIsPanning(true);
                       panStartRef.current = { x: evt.clientX, y: evt.clientY, startPanX: pan.x, startPanY: pan.y };
                       return;
