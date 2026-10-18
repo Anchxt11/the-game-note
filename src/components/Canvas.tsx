@@ -1089,6 +1089,7 @@ export const Canvas: React.FC<CanvasProps> = ({
     origEndY?: number;
     startMouseX?: number;
     startMouseY?: number;
+    hasExceededThreshold?: boolean;
     origContent?: Record<string, any>;
     connectedItems?: Array<{ id: string; origX: number; origY: number; width: number; height: number; zIndex: number }>;
   } | null>(null);
@@ -1789,6 +1790,9 @@ export const Canvas: React.FC<CanvasProps> = ({
       target.classList.contains('canvas-plane') || 
       target.classList.contains('canvas-viewport-grid') || 
       (!target.closest('[id^="milanote-el-"]') && 
+       !target.closest('.milanote-lines-layer') && 
+       !target.closest('.milanote-lines-interactive-overlay') && 
+       !target.closest('.line-floating-label') && 
        !target.closest('.canvas-scrollbar-h') && 
        !target.closest('.canvas-scrollbar-v') && 
        !target.closest('.unsorted-drawer') && 
@@ -2316,9 +2320,18 @@ export const Canvas: React.FC<CanvasProps> = ({
       return;
     }
 
-    const isMouseRelease = (!ptr.pointerType || ptr.pointerType === 'mouse') && e.buttons === 0;
-    if (isMouseRelease && (selectionRef.current || dragRef.current || lineHandleDragRef.current || headerResizeRef.current || isPanning || isPanningRef.current || scrollbarDragRef.current)) {
+    const isPointerRelease = (!ptr.pointerType || ptr.pointerType === 'mouse' || ptr.pointerType === 'pen') && e.buttons === 0;
+    if (isPointerRelease && (selectionRef.current || dragRef.current || lineHandleDragRef.current || headerResizeRef.current || isPanning || isPanningRef.current || scrollbarDragRef.current)) {
       mouseUpRef.current(e);
+      return;
+    }
+
+    // Explicit Stylus Hover Guard: If the stylus is hovering above the screen without contact
+    // (e.buttons === 0 or pressure === 0), it must NEVER drag or move elements.
+    if (ptr.pointerType === 'pen' && (e.buttons === 0 || (ptr.pressure !== undefined && ptr.pressure === 0 && e.buttons === 0))) {
+      if (selectionRef.current || dragRef.current || lineHandleDragRef.current || headerResizeRef.current || isPanning || isPanningRef.current || scrollbarDragRef.current) {
+        mouseUpRef.current(e);
+      }
       return;
     }
     if (scrollbarDragRef.current) {
@@ -2367,9 +2380,24 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
 
     if (lineHandleDragRef.current) {
+      if (e.buttons === 0 && (ptr.pointerType === 'mouse' || ptr.pointerType === 'pen')) {
+        mouseUpRef.current(e);
+        return;
+      }
       const { lineId, handle } = lineHandleDragRef.current;
       const lineEl = elements.find((x) => x.id === lineId);
       if (!lineEl) return;
+
+      // Minimum movement threshold to distinguish tap-to-select from intentional dragging
+      if (lineHandleDragRef.current.startMouseX !== undefined && lineHandleDragRef.current.startMouseY !== undefined) {
+        const moveDist = Math.hypot(e.clientX - lineHandleDragRef.current.startMouseX, e.clientY - lineHandleDragRef.current.startMouseY);
+        const threshold = (ptr.pointerType === 'pen' || ptr.pointerType === 'touch') ? 6 : 3;
+        if (!lineHandleDragRef.current.hasExceededThreshold && moveDist < threshold) {
+          return;
+        }
+        lineHandleDragRef.current.hasExceededThreshold = true;
+      }
+
       const pos = screenToCanvas(e.clientX, e.clientY);
       const currentContent = (lineDragPreviewRef.current?.lineId === lineId ? lineDragPreviewRef.current.content : lineEl.content) || {};
 
@@ -2383,7 +2411,7 @@ export const Canvas: React.FC<CanvasProps> = ({
             if (elDiv) {
               const newX = Math.round(item.origX + dx);
               const newY = Math.round(item.origY + dy);
-              elDiv.style.transform = `translate(${newX}px, ${newY}px)`;
+              elDiv.style.transform = `translate3d(${newX}px, ${newY}px, 0)`;
               elDiv.style.left = '0px';
               elDiv.style.top = '0px';
             }
@@ -2913,10 +2941,15 @@ export const Canvas: React.FC<CanvasProps> = ({
     onDragChange?.(false);
 
     if (lineHandleDragRef.current) {
-      if (lineDragPreviewRef.current) {
+      const distMoved = (lineHandleDragRef.current.startMouseX !== undefined && lineHandleDragRef.current.startMouseY !== undefined)
+        ? Math.hypot(e.clientX - lineHandleDragRef.current.startMouseX, e.clientY - lineHandleDragRef.current.startMouseY)
+        : 0;
+      const isMoved = Boolean(lineHandleDragRef.current.hasExceededThreshold) || (distMoved >= 3);
+
+      if (lineDragPreviewRef.current && isMoved) {
         onContentChange(lineDragPreviewRef.current.lineId, lineDragPreviewRef.current.content);
       }
-      if (lineHandleDragRef.current.handle === 'move' && lineHandleDragRef.current.connectedItems && lineHandleDragRef.current.connectedItems.length > 0 && lineHandleDragRef.current.startMouseX !== undefined && lineHandleDragRef.current.startMouseY !== undefined) {
+      if (isMoved && lineHandleDragRef.current.handle === 'move' && lineHandleDragRef.current.connectedItems && lineHandleDragRef.current.connectedItems.length > 0 && lineHandleDragRef.current.startMouseX !== undefined && lineHandleDragRef.current.startMouseY !== undefined) {
         const dx = (e.clientX - lineHandleDragRef.current.startMouseX) / scale;
         const dy = (e.clientY - lineHandleDragRef.current.startMouseY) / scale;
         const updates: ElementPositionUpdate[] = lineHandleDragRef.current.connectedItems.map((item) => ({
@@ -3281,14 +3314,14 @@ export const Canvas: React.FC<CanvasProps> = ({
 
     window.addEventListener('pointerdown', handleWindowPointerDownCapture as any, { capture: true });
     window.addEventListener('pointermove', handleMouseMove as any);
-    window.addEventListener('pointerup', handleMouseUp as any);
-    window.addEventListener('pointercancel', handleMouseUp as any);
+    window.addEventListener('pointerup', handleMouseUp as any, { capture: true });
+    window.addEventListener('pointercancel', handleMouseUp as any, { capture: true });
     window.addEventListener('blur', handleMouseUp as any);
     return () => {
       window.removeEventListener('pointerdown', handleWindowPointerDownCapture as any, { capture: true } as any);
       window.removeEventListener('pointermove', handleMouseMove as any);
-      window.removeEventListener('pointerup', handleMouseUp as any);
-      window.removeEventListener('pointercancel', handleMouseUp as any);
+      window.removeEventListener('pointerup', handleMouseUp as any, { capture: true } as any);
+      window.removeEventListener('pointercancel', handleMouseUp as any, { capture: true } as any);
       window.removeEventListener('blur', handleMouseUp as any);
       if (dragRafRef.current !== null) {
         cancelAnimationFrame(dragRafRef.current);
@@ -3512,7 +3545,13 @@ export const Canvas: React.FC<CanvasProps> = ({
     if (onCreateQuickLine) {
       const newLineId = await onCreateQuickLine(el.id);
       if (newLineId) {
-        lineHandleDragRef.current = { lineId: newLineId, handle: 'end' };
+        lineHandleDragRef.current = {
+          lineId: newLineId,
+          handle: 'end',
+          startMouseX: e.clientX,
+          startMouseY: e.clientY,
+          hasExceededThreshold: true,
+        };
         setActiveLineHandleDrag(newLineId);
       }
     }
@@ -3881,6 +3920,83 @@ export const Canvas: React.FC<CanvasProps> = ({
       onCreateTaskListFromItem(Math.round(canvasPos.x - 170), Math.round(canvasPos.y - 20), item, foundColId);
     }
   }, [elements, onContentChange, screenToCanvas, columns, onCreateTaskListFromItem, onSelectElement, onMultiSelect, onDeleteElement]);
+
+  const handleLineMouseDown = (evt: React.MouseEvent | React.PointerEvent, el: Element) => {
+    if (isSpacePressedRef.current && evt.button === 0) {
+      evt.preventDefault();
+      evt.stopPropagation();
+      isPanningRef.current = true;
+      setIsPanning(true);
+      panStartRef.current = { x: evt.clientX, y: evt.clientY, startPanX: pan.x, startPanY: pan.y };
+      return;
+    }
+    if (evt.button === 1 || evt.buttons === 4) {
+      evt.preventDefault();
+      evt.stopPropagation();
+      isPanningRef.current = true;
+      setIsPanning(true);
+      panStartRef.current = { x: evt.clientX, y: evt.clientY, startPanX: pan.x, startPanY: pan.y };
+      return;
+    }
+    if ((evt.ctrlKey || evt.metaKey) && evt.button === 0) {
+      evt.preventDefault();
+      evt.stopPropagation();
+      const currentSelected = selectedIds.length > 0 ? [...selectedIds] : (selectedElementId ? [selectedElementId] : []);
+      const index = currentSelected.indexOf(el.id);
+      let nextSelected: string[];
+      if (index >= 0) {
+        nextSelected = currentSelected.filter((id) => id !== el.id);
+      } else {
+        nextSelected = [...currentSelected, el.id];
+      }
+      if (onMultiSelect) {
+        onMultiSelect(nextSelected);
+      } else {
+        onSelectElement(nextSelected.length > 0 ? nextSelected[nextSelected.length - 1] : null);
+      }
+      return;
+    }
+    if (evt.button !== 0) return;
+
+    evt.stopPropagation();
+    const now = Date.now();
+    if (evt.type === 'mousedown' && lastElementPointerDownTimeRef.current.id === el.id && now - lastElementPointerDownTimeRef.current.time < 300) {
+      return;
+    }
+    if (evt.type === 'pointerdown') {
+      lastElementPointerDownTimeRef.current = { id: el.id, time: now };
+      try { (evt.target as any).setPointerCapture?.((evt as any).pointerId); } catch (_) {}
+    }
+
+    onSelectElement(el.id);
+    if (onMultiSelect) onMultiSelect([el.id]);
+
+    const content = (lineDragPreviewRef.current?.lineId === el.id ? lineDragPreviewRef.current.content : el.content) || {};
+    const sPt = computeLineEndpoint(el, content, true);
+    const ePt = computeLineEndpoint(el, content, false);
+    const connectedIds: string[] = [];
+    if (content.start_target_id) connectedIds.push(content.start_target_id);
+    if (content.end_target_id && !connectedIds.includes(content.end_target_id)) connectedIds.push(content.end_target_id);
+    const connectedItems = connectedIds.map((cid) => {
+      const found = elements.find((x) => x.id === cid);
+      return found ? { id: found.id, origX: found.x, origY: found.y, width: found.width, height: found.height, zIndex: found.z_index } : null;
+    }).filter(Boolean) as Array<{ id: string; origX: number; origY: number; width: number; height: number; zIndex: number }>;
+
+    lineHandleDragRef.current = {
+      lineId: el.id,
+      handle: 'move',
+      origStartX: sPt.x - el.x,
+      origStartY: sPt.y - el.y,
+      origEndX: ePt.x - el.x,
+      origEndY: ePt.y - el.y,
+      startMouseX: evt.clientX,
+      startMouseY: evt.clientY,
+      hasExceededThreshold: false,
+      origContent: { ...content },
+      connectedItems
+    };
+    setActiveLineHandleDrag(el.id);
+  };
 
   const renderCardContent = (el: Element, inColumn: boolean = false, customMouseDown?: (e: React.MouseEvent, el: Element) => void) => {
     const isEditing = editingElementId === el.id;
@@ -5168,93 +5284,8 @@ export const Canvas: React.FC<CanvasProps> = ({
                     onSelectElement(el.id);
                     if (onMultiSelect) onMultiSelect([el.id]);
                   }}
-                  onMouseDown={(evt) => {
-                    if (isSpacePressedRef.current && evt.button === 0) {
-                      evt.preventDefault();
-                      isPanningRef.current = true;
-                      setIsPanning(true);
-                      panStartRef.current = { x: evt.clientX, y: evt.clientY, startPanX: pan.x, startPanY: pan.y };
-                      return;
-                    }
-                    if (evt.button === 1 || evt.buttons === 4) {
-                      evt.preventDefault();
-                      isPanningRef.current = true;
-                      setIsPanning(true);
-                      panStartRef.current = { x: evt.clientX, y: evt.clientY, startPanX: pan.x, startPanY: pan.y };
-                      return;
-                    }
-                    if ((evt.ctrlKey || evt.metaKey) && evt.button === 0) {
-                      evt.preventDefault();
-                      evt.stopPropagation();
-                      const currentSelected = selectedIds.length > 0 ? [...selectedIds] : (selectedElementId ? [selectedElementId] : []);
-                      const index = currentSelected.indexOf(el.id);
-                      let nextSelected: string[];
-                      if (index >= 0) {
-                        nextSelected = currentSelected.filter((id) => id !== el.id);
-                      } else {
-                        nextSelected = [...currentSelected, el.id];
-                      }
-                      if (onMultiSelect) {
-                        onMultiSelect(nextSelected);
-                      } else {
-                        onSelectElement(nextSelected.length > 0 ? nextSelected[nextSelected.length - 1] : null);
-                      }
-                      return;
-                    }
-                    evt.stopPropagation();
-                    onSelectElement(el.id);
-                    if (onMultiSelect) onMultiSelect([el.id]);
-                    const sPt = computeLineEndpoint(el, content, true);
-                    const ePt = computeLineEndpoint(el, content, false);
-                    const connectedIds: string[] = [];
-                    if (content.start_target_id) connectedIds.push(content.start_target_id);
-                    if (content.end_target_id && !connectedIds.includes(content.end_target_id)) connectedIds.push(content.end_target_id);
-                    const connectedItems = connectedIds.map((cid) => {
-                      const found = elements.find((x) => x.id === cid);
-                      return found ? { id: found.id, origX: found.x, origY: found.y, width: found.width, height: found.height, zIndex: found.z_index } : null;
-                    }).filter(Boolean) as Array<{ id: string; origX: number; origY: number; width: number; height: number; zIndex: number }>;
-
-                    lineHandleDragRef.current = {
-                      lineId: el.id,
-                      handle: 'move',
-                      origStartX: sPt.x - el.x,
-                      origStartY: sPt.y - el.y,
-                      origEndX: ePt.x - el.x,
-                      origEndY: ePt.y - el.y,
-                      startMouseX: evt.clientX,
-                      startMouseY: evt.clientY,
-                      origContent: { ...content },
-                      connectedItems
-                    };
-                    setActiveLineHandleDrag(el.id);
-                  }}
-                  onPointerDown={(evt) => {
-                    evt.stopPropagation();
-                    onSelectElement(el.id);
-                    const sPt = computeLineEndpoint(el, content, true);
-                    const ePt = computeLineEndpoint(el, content, false);
-                    const connectedIds: string[] = [];
-                    if (content.start_target_id) connectedIds.push(content.start_target_id);
-                    if (content.end_target_id && !connectedIds.includes(content.end_target_id)) connectedIds.push(content.end_target_id);
-                    const connectedItems = connectedIds.map((cid) => {
-                      const found = elements.find((x) => x.id === cid);
-                      return found ? { id: found.id, origX: found.x, origY: found.y, width: found.width, height: found.height, zIndex: found.z_index } : null;
-                    }).filter(Boolean) as Array<{ id: string; origX: number; origY: number; width: number; height: number; zIndex: number }>;
-
-                    lineHandleDragRef.current = {
-                      lineId: el.id,
-                      handle: 'move',
-                      origStartX: sPt.x - el.x,
-                      origStartY: sPt.y - el.y,
-                      origEndX: ePt.x - el.x,
-                      origEndY: ePt.y - el.y,
-                      startMouseX: evt.clientX,
-                      startMouseY: evt.clientY,
-                      origContent: { ...content },
-                      connectedItems
-                    };
-                    setActiveLineHandleDrag(el.id);
-                  }}
+                  onMouseDown={(evt) => handleLineMouseDown(evt, el)}
+                  onPointerDown={(evt) => handleLineMouseDown(evt, el)}
                   onTouchStart={(evt) => evt.stopPropagation()}
                   onContextMenu={(evt) => {
                     evt.preventDefault();
@@ -5352,95 +5383,15 @@ export const Canvas: React.FC<CanvasProps> = ({
                   strokeWidth={Math.max(16, weight + 12)}
                   fill="none"
                   style={{ cursor: 'move', pointerEvents: 'auto' }}
-                  onMouseDown={(evt) => {
-                    if (isSpacePressedRef.current && evt.button === 0) {
-                      evt.preventDefault();
-                      isPanningRef.current = true;
-                      setIsPanning(true);
-                      panStartRef.current = { x: evt.clientX, y: evt.clientY, startPanX: pan.x, startPanY: pan.y };
-                      return;
-                    }
-                    if (evt.button === 1 || evt.buttons === 4) {
-                      evt.preventDefault();
-                      isPanningRef.current = true;
-                      setIsPanning(true);
-                      panStartRef.current = { x: evt.clientX, y: evt.clientY, startPanX: pan.x, startPanY: pan.y };
-                      return;
-                    }
-                    if ((evt.ctrlKey || evt.metaKey) && evt.button === 0) {
-                      evt.preventDefault();
-                      evt.stopPropagation();
-                      const currentSelected = selectedIds.length > 0 ? [...selectedIds] : (selectedElementId ? [selectedElementId] : []);
-                      const index = currentSelected.indexOf(el.id);
-                      let nextSelected: string[];
-                      if (index >= 0) {
-                        nextSelected = currentSelected.filter((id) => id !== el.id);
-                      } else {
-                        nextSelected = [...currentSelected, el.id];
-                      }
-                      if (onMultiSelect) {
-                        onMultiSelect(nextSelected);
-                      } else {
-                        onSelectElement(nextSelected.length > 0 ? nextSelected[nextSelected.length - 1] : null);
-                      }
-                      return;
-                    }
-                    evt.stopPropagation();
-                    onSelectElement(el.id);
-                    if (onMultiSelect) onMultiSelect([el.id]);
-                    const sPt = computeLineEndpoint(el, content, true);
-                    const ePt = computeLineEndpoint(el, content, false);
-                    const connectedIds: string[] = [];
-                    if (content.start_target_id) connectedIds.push(content.start_target_id);
-                    if (content.end_target_id && !connectedIds.includes(content.end_target_id)) connectedIds.push(content.end_target_id);
-                    const connectedItems = connectedIds.map((cid) => {
-                      const found = elements.find((x) => x.id === cid);
-                      return found ? { id: found.id, origX: found.x, origY: found.y, width: found.width, height: found.height, zIndex: found.z_index } : null;
-                    }).filter(Boolean) as Array<{ id: string; origX: number; origY: number; width: number; height: number; zIndex: number }>;
-
-                    lineHandleDragRef.current = {
-                      lineId: el.id,
-                      handle: 'move',
-                      origStartX: sPt.x - el.x,
-                      origStartY: sPt.y - el.y,
-                      origEndX: ePt.x - el.x,
-                      origEndY: ePt.y - el.y,
-                      startMouseX: evt.clientX,
-                      startMouseY: evt.clientY,
-                      origContent: { ...content },
-                      connectedItems
-                    };
-                    setActiveLineHandleDrag(el.id);
-                  }}
-                  onPointerDown={(evt) => {
-                    if (evt.pointerType === 'mouse') return;
-                    evt.stopPropagation();
-                    onSelectElement(el.id);
-                    const sPt = computeLineEndpoint(el, content, true);
-                    const ePt = computeLineEndpoint(el, content, false);
-                    const connectedIds: string[] = [];
-                    if (content.start_target_id) connectedIds.push(content.start_target_id);
-                    if (content.end_target_id && !connectedIds.includes(content.end_target_id)) connectedIds.push(content.end_target_id);
-                    const connectedItems = connectedIds.map((cid) => {
-                      const found = elements.find((x) => x.id === cid);
-                      return found ? { id: found.id, origX: found.x, origY: found.y, width: found.width, height: found.height, zIndex: found.z_index } : null;
-                    }).filter(Boolean) as Array<{ id: string; origX: number; origY: number; width: number; height: number; zIndex: number }>;
-
-                    lineHandleDragRef.current = {
-                      lineId: el.id,
-                      handle: 'move',
-                      origStartX: sPt.x - el.x,
-                      origStartY: sPt.y - el.y,
-                      origEndX: ePt.x - el.x,
-                      origEndY: ePt.y - el.y,
-                      startMouseX: evt.clientX,
-                      startMouseY: evt.clientY,
-                      origContent: { ...content },
-                      connectedItems
-                    };
-                    setActiveLineHandleDrag(el.id);
-                  }}
+                  onMouseDown={(evt) => handleLineMouseDown(evt, el)}
+                  onPointerDown={(evt) => handleLineMouseDown(evt, el)}
                   onTouchStart={(evt) => evt.stopPropagation()}
+                  onContextMenu={(evt) => {
+                    evt.preventDefault();
+                    evt.stopPropagation();
+                    if (isTouchHoldContextMenu(evt)) return;
+                    onContextMenu(evt, el);
+                  }}
                 />
                 {/* VISIBLE SELECTED CURVED LINE ABOVE CARDS */}
                 <path
@@ -5463,13 +5414,26 @@ export const Canvas: React.FC<CanvasProps> = ({
                   style={{ pointerEvents: 'auto', cursor: 'grab', touchAction: 'none' }}
                   onMouseDown={(evt) => {
                     evt.stopPropagation();
-                    lineHandleDragRef.current = { lineId: el.id, handle: 'start' };
+                    lineHandleDragRef.current = {
+                      lineId: el.id,
+                      handle: 'start',
+                      startMouseX: evt.clientX,
+                      startMouseY: evt.clientY,
+                      hasExceededThreshold: false,
+                    };
                     setActiveLineHandleDrag(el.id);
                   }}
                   onPointerDown={(evt) => {
                     evt.stopPropagation();
                     evt.preventDefault();
-                    lineHandleDragRef.current = { lineId: el.id, handle: 'start' };
+                    try { (evt.target as any).setPointerCapture?.(evt.pointerId); } catch (_) {}
+                    lineHandleDragRef.current = {
+                      lineId: el.id,
+                      handle: 'start',
+                      startMouseX: evt.clientX,
+                      startMouseY: evt.clientY,
+                      hasExceededThreshold: false,
+                    };
                     setActiveLineHandleDrag(el.id);
                   }}
                   onTouchStart={(evt) => evt.stopPropagation()}
@@ -5491,13 +5455,26 @@ export const Canvas: React.FC<CanvasProps> = ({
                   style={{ pointerEvents: 'auto', cursor: 'grab', touchAction: 'none' }}
                   onMouseDown={(evt) => {
                     evt.stopPropagation();
-                    lineHandleDragRef.current = { lineId: el.id, handle: 'middle' };
+                    lineHandleDragRef.current = {
+                      lineId: el.id,
+                      handle: 'middle',
+                      startMouseX: evt.clientX,
+                      startMouseY: evt.clientY,
+                      hasExceededThreshold: false,
+                    };
                     setActiveLineHandleDrag(el.id);
                   }}
                   onPointerDown={(evt) => {
                     evt.stopPropagation();
                     evt.preventDefault();
-                    lineHandleDragRef.current = { lineId: el.id, handle: 'middle' };
+                    try { (evt.target as any).setPointerCapture?.(evt.pointerId); } catch (_) {}
+                    lineHandleDragRef.current = {
+                      lineId: el.id,
+                      handle: 'middle',
+                      startMouseX: evt.clientX,
+                      startMouseY: evt.clientY,
+                      hasExceededThreshold: false,
+                    };
                     setActiveLineHandleDrag(el.id);
                   }}
                   onTouchStart={(evt) => evt.stopPropagation()}
@@ -5519,13 +5496,26 @@ export const Canvas: React.FC<CanvasProps> = ({
                   style={{ pointerEvents: 'auto', cursor: 'grab', touchAction: 'none' }}
                   onMouseDown={(evt) => {
                     evt.stopPropagation();
-                    lineHandleDragRef.current = { lineId: el.id, handle: 'end' };
+                    lineHandleDragRef.current = {
+                      lineId: el.id,
+                      handle: 'end',
+                      startMouseX: evt.clientX,
+                      startMouseY: evt.clientY,
+                      hasExceededThreshold: false,
+                    };
                     setActiveLineHandleDrag(el.id);
                   }}
                   onPointerDown={(evt) => {
                     evt.stopPropagation();
                     evt.preventDefault();
-                    lineHandleDragRef.current = { lineId: el.id, handle: 'end' };
+                    try { (evt.target as any).setPointerCapture?.(evt.pointerId); } catch (_) {}
+                    lineHandleDragRef.current = {
+                      lineId: el.id,
+                      handle: 'end',
+                      startMouseX: evt.clientX,
+                      startMouseY: evt.clientY,
+                      hasExceededThreshold: false,
+                    };
                     setActiveLineHandleDrag(el.id);
                   }}
                   onTouchStart={(evt) => evt.stopPropagation()}
@@ -5587,14 +5577,27 @@ export const Canvas: React.FC<CanvasProps> = ({
               onMouseDown={(evt) => {
                 evt.stopPropagation();
                 if (!isEditing) {
-                  lineHandleDragRef.current = { lineId: el.id, handle: 'middle' };
+                  lineHandleDragRef.current = {
+                    lineId: el.id,
+                    handle: 'middle',
+                    startMouseX: evt.clientX,
+                    startMouseY: evt.clientY,
+                    hasExceededThreshold: false,
+                  };
                   setActiveLineHandleDrag(el.id);
                 }
               }}
               onPointerDown={(evt) => {
                 evt.stopPropagation();
                 if (!isEditing) {
-                  lineHandleDragRef.current = { lineId: el.id, handle: 'middle' };
+                  try { (evt.target as any).setPointerCapture?.(evt.pointerId); } catch (_) {}
+                  lineHandleDragRef.current = {
+                    lineId: el.id,
+                    handle: 'middle',
+                    startMouseX: evt.clientX,
+                    startMouseY: evt.clientY,
+                    hasExceededThreshold: false,
+                  };
                   setActiveLineHandleDrag(el.id);
                 }
               }}
