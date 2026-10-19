@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::error::{AppError, Result};
 
+#[derive(Debug, Clone)]
 pub struct FileStorage {
     root_dir: PathBuf,
 }
@@ -54,6 +55,10 @@ impl FileStorage {
         let dest_path = self.root_dir.join(&unique_filename);
         fs::write(&dest_path, bytes)?;
         Ok(unique_filename)
+    }
+
+    pub fn root_dir(&self) -> &Path {
+        &self.root_dir
     }
 
     pub fn get_file_path(&self, filename: &str) -> PathBuf {

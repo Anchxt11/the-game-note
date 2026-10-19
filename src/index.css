@@ -4763,6 +4763,44 @@ body, html, #root {
    PHASE 3.5: MILANOTE MOBILE NATIVE UI OVERHAUL (IMAGES 1, 2, 3, 4, 5)
    ========================================================================== */
 
+/* Top-Left Floating Sync Ready Pill (Android Phone Root Board) */
+.mobile-sync-floating-pill {
+  display: none;
+  position: fixed;
+  top: calc(var(--safe-area-top, 0px) + 12px);
+  left: 14px;
+  z-index: 99990;
+  align-items: center;
+}
+
+.mobile-sync-floating-pill .sync-status-pill {
+  background: rgba(30, 30, 32, 0.85) !important;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.16) !important;
+  border-radius: 6px !important;
+  padding: 5px 12px !important;
+  color: #e2e8f0 !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
+  min-height: 32px !important;
+}
+
+.mobile-sync-floating-pill .sync-status-pill:active {
+  transform: scale(0.96);
+  background: rgba(45, 45, 48, 0.95) !important;
+}
+
+.mobile-board-topbar .sync-status-pill {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  padding: 4px 10px !important;
+  font-size: 12px !important;
+  font-weight: 500 !important;
+  border-radius: 6px !important;
+}
+
 /* Top-Right Floating Unsorted Pill (Images 1-5) */
 .mobile-unsorted-floating-pill {
   display: none;
@@ -5583,6 +5621,12 @@ body.device-tablet .mobile-context-sheet-backdrop {
     display: flex !important;
   }
 
+  .mobile-sync-floating-pill {
+    display: inline-flex !important;
+    top: calc(var(--safe-area-top, 0px) + 12px) !important;
+    left: 14px !important;
+  }
+
   .mobile-unsorted-floating-pill {
     display: inline-flex !important;
     top: calc(var(--safe-area-top, 0px) + 12px) !important;
@@ -6008,5 +6052,494 @@ body.device-tablet .mobile-context-sheet-backdrop {
   color: #60a5fa;
 }
 
+/* ==========================================================================
+   BOARD SWITCHER DROPDOWN & BREADCRUMB CONTROLS
+   ========================================================================== */
+.breadcrumb-dropdown-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--milanote-text-muted);
+  padding: 3px 4px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-left: 2px;
+  transition: all 0.15s ease;
+}
 
+.breadcrumb-dropdown-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--milanote-text-primary);
+}
+
+.board-switcher-container {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  z-index: 1000;
+}
+
+/* Fullscreen transparent backdrop for 100% reliable click-outside dismiss */
+.board-switcher-backdrop {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 99990;
+  background: transparent;
+  cursor: default;
+}
+
+.board-switcher-popover {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  width: 290px;
+  max-width: calc(100vw - 32px);
+  max-height: 400px;
+  background: #252528;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(0, 0, 0, 0.3);
+  z-index: 99995;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: fadeInModal 0.12s ease-out;
+}
+
+.board-switcher-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.board-switcher-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--milanote-text-muted);
+}
+
+.board-switcher-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--milanote-text-muted);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.board-switcher-close-btn:hover {
+  color: var(--milanote-text-primary);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.board-switcher-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: #1c1c1f;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  margin: 6px 8px 4px 8px;
+}
+
+.board-switcher-search input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--milanote-text-primary);
+  font-size: 12.5px;
+}
+
+.board-switcher-search input::placeholder {
+  color: var(--milanote-text-muted);
+  font-size: 12px;
+}
+
+.clear-filter-btn {
+  background: transparent;
+  border: none;
+  color: var(--milanote-text-muted);
+  cursor: pointer;
+  padding: 1px;
+}
+
+.board-switcher-list {
+  flex: 1;
+  overflow-y: auto;
+  max-height: 250px;
+  padding: 4px 0;
+}
+
+.board-switcher-loading,
+.board-switcher-empty {
+  padding: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--milanote-text-muted);
+}
+
+.board-switcher-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  margin: 1px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 0.1s ease;
+  user-select: none;
+}
+
+.board-switcher-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.board-switcher-item.active {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.board-switcher-item-left {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  flex: 1;
+}
+
+.board-folder-icon {
+  color: var(--milanote-accent, #ff7b54);
+  flex-shrink: 0;
+}
+
+.board-item-title {
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--milanote-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.board-switcher-item.active .board-item-title {
+  font-weight: 600;
+  color: #ffffff;
+}
+
+.board-switcher-item-right {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.root-badge {
+  font-size: 9.5px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--milanote-text-muted);
+  padding: 1px 5px;
+  border-radius: 2px;
+  font-weight: 500;
+}
+
+.active-check-icon {
+  color: #ffffff;
+}
+
+.board-item-delete-btn {
+  opacity: 0;
+  background: transparent;
+  border: none;
+  color: var(--milanote-text-muted);
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.board-switcher-item:hover .board-item-delete-btn {
+  opacity: 1;
+}
+
+.board-item-delete-btn:hover {
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.15);
+}
+
+.board-switcher-footer {
+  padding: 6px 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.board-switcher-add-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 8px;
+  background: transparent;
+  border: 1px dashed rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  color: var(--milanote-text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  justify-content: center;
+}
+
+.board-switcher-add-btn:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.25);
+  color: var(--milanote-text-primary);
+}
+
+.board-switcher-new-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.board-switcher-new-form input {
+  background: #1c1c1f;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 3px;
+  padding: 5px 8px;
+  color: var(--milanote-text-primary);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.board-switcher-new-form input:focus {
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.new-form-buttons {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.new-form-buttons .btn-cancel {
+  background: transparent;
+  border: none;
+  color: var(--milanote-text-muted);
+  font-size: 11.5px;
+  padding: 3px 6px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.new-form-buttons .btn-submit {
+  background: rgba(255, 255, 255, 0.15);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #ffffff;
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 3px 10px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.new-form-buttons .btn-submit:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+/* Dark cosmic styling for form selects and dropdowns */
+select {
+  background-color: #1a1a1d !important;
+  color: #f8fafc !important;
+  border: 1px solid rgba(255, 255, 255, 0.15) !important;
+  border-radius: 8px;
+  outline: none;
+}
+
+select option {
+  background-color: #1a1a1d !important;
+  color: #f8fafc !important;
+}
+
+select:focus {
+  border-color: #38bdf8 !important;
+  outline: none !important;
+}
+
+/* Startup & Reload Light Gray Sync Overlay */
+.startup-sync-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 999999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: #e5e7eb;
+  backdrop-filter: blur(8px);
+  animation: fadeInOverlay 0.2s ease-out forwards;
+}
+
+.startup-sync-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 36px 52px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 28px;
+  box-shadow: 0 20px 48px -12px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(0, 0, 0, 0.04);
+}
+
+.startup-sync-logo-container {
+  position: relative;
+  width: 84px;
+  height: 84px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.startup-sync-logo {
+  width: 76px;
+  height: 76px;
+  border-radius: 20px;
+  object-fit: contain;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.1);
+  position: relative;
+  z-index: 2;
+  animation: logoPulse 2s ease-in-out infinite;
+}
+
+.startup-sync-pulse-ring {
+  position: absolute;
+  inset: -6px;
+  border-radius: 26px;
+  border: 2px solid rgba(59, 130, 246, 0.4);
+  animation: pulseRing 2s cubic-bezier(0.24, 0, 0.38, 1) infinite;
+  z-index: 1;
+}
+
+.startup-sync-title {
+  font-family: 'Outfit', sans-serif;
+  font-size: 20px;
+  font-weight: 600;
+  color: #1e293b;
+  margin-top: 18px;
+  letter-spacing: -0.01em;
+}
+
+.startup-sync-status {
+  font-size: 13.5px;
+  font-weight: 500;
+  color: #64748b;
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.startup-sync-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid #cbd5e1;
+  border-top-color: #3b82f6;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes fadeInOverlay {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes logoPulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+
+@keyframes pulseRing {
+  0% { transform: scale(0.95); opacity: 0.8; }
+  50% { transform: scale(1.1); opacity: 0.2; }
+  100% { transform: scale(0.95); opacity: 0.8; }
+}
+
+/* ==========================================================================
+   REVAMPED SYNC & DEVICES MODAL (DESKTOP + ANDROID MOBILE)
+   ========================================================================== */
+
+.sync-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.65);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  animation: fadeInModal 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.sync-modal-window {
+  background: #18181b;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  width: 520px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+  overflow: hidden;
+}
+
+@media (max-width: 640px) {
+  .sync-modal-backdrop {
+    align-items: flex-end;
+    padding: 0;
+  }
+
+  .sync-modal-window {
+    width: 100vw;
+    max-width: 100vw;
+    max-height: 90vh;
+    border-radius: 20px 20px 0 0;
+    border-bottom: none;
+    padding-bottom: max(16px, env(safe-area-inset-bottom));
+    animation: slideUpBottomSheet 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+}
+
+@keyframes fadeInModal {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes slideUpBottomSheet {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+.sync-bottom-sheet-drag-handle {
+  width: 36px;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.25);
+  border-radius: 2px;
+  margin: 10px auto 4px auto;
+}
 

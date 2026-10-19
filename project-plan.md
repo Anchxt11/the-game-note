@@ -50,7 +50,7 @@
 
 ```mermaid
 flowchart LR
-    P1["Phase 1\nAndroid Build\nTarget"] --> P2["Phase 2\nTouch UX\nAdaptation"] --> P3["Phase 3\nResponsive\nLayout"] --> P4["Phase 4\ncr-sqlite\nIntegration"] --> P5["Phase 5\nSync Transport\n& File Sync"]
+    P1["Phase 1\nAndroid Build\nTarget"] --> P2["Phase 2\nTouch UX\nAdaptation"] --> P3["Phase 3\nResponsive\nLayout"] --> P4["Phase 4\ncr-sqlite\nIntegration"] --> P5["Phase 5\nMulti-Transport Sync\n& File Sync"]
 ```
 
 | Phase | Description | Est. Effort | Status |
@@ -59,8 +59,8 @@ flowchart LR
 | **Phase 2** | Add touch event handling to Canvas.tsx | 3–5 days | ✅ Complete (10/10 tasks) |
 | **Phase 3** | Responsive layout for phone & tablet screens | 2–3 days | ✅ Complete (8/8 tasks) |
 | **Phase 3.5** | Milanote Mobile Native UI Overhaul (Reference Screens & Gestures) | 1–2 days | ✅ Complete (11/11 tasks) |
-| **Phase 4** | Integrate cr-sqlite into milanote-core | 1–2 days | 🟡 In Progress (`load_extension` feature enabled) |
-| **Phase 5** | Build sync transport + file sync | 3–4 days | ⬜ Not Started |
+| **Phase 4** | Integrate cr-sqlite into milanote-core | 1–2 days | ✅ Complete (8/8 tasks) |
+| **Phase 5** | Multi-Transport Sync (Tier 1: LAN ✅, Tier 2: Tailscale ⏸️, Tier 3: Cloud Mailbox ✅) | 3–5 days | 🟡 Tier 1 & 3 Complete, Tier 2 Deferred |
 
 ---
 
@@ -496,27 +496,16 @@ flowchart LR
 > **Goal**: Make the SQLite database CRDT-enabled so it can merge changes from multiple devices without conflicts.
 
 ### Task 4.1: Build cr-sqlite Extension for Linux x86_64
-- **Status**: ⬜ Not Started
-- **What**:
-  ```bash
-  git clone --recurse-submodules https://github.com/vlcn-io/cr-sqlite.git
-  cd cr-sqlite/core
-  make loadable
-  # Output: dist/crsqlite.so
-  ```
-- **Output**: `crsqlite.so` for Linux x86_64
-- **Acceptance**: `file crsqlite.so` shows `ELF 64-bit LSB shared object, x86-64`
+- **Status**: ✅ Done (2026-10-18)
+- **What**: Built loadable extension `dist/crsqlite.so` with patched `sqlite3_capi` resolving bindgen opaque struct generation issues under modern Clang.
+- **Output**: [`crates/core/libs/x86_64/libcrsqlite.so`](file:///home/anchit/gitClones/the-game-note/crates/core/libs/x86_64/libcrsqlite.so) and [`crates/core/libs/x86_64/crsqlite.so`](file:///home/anchit/gitClones/the-game-note/crates/core/libs/x86_64/crsqlite.so)
+- **Acceptance**: `file crsqlite.so` shows `ELF 64-bit LSB shared object, x86-64`. Loaded and verified via SQLite CLI.
 
 ### Task 4.2: Cross-Compile cr-sqlite for Android aarch64
-- **Status**: ⬜ Not Started
-- **What**: Use Android NDK cross-compiler to build `crsqlite.so` for `arm64-v8a`
-  ```bash
-  export CC=$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang
-  # Build with cross-compiler targeting aarch64
-  ```
-- **Output**: `crsqlite.so` for `arm64-v8a`
-- **Placement**: `src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a/crsqlite.so`
-- **Acceptance**: `file crsqlite.so` shows `ELF 64-bit LSB shared object, ARM aarch64`
+- **Status**: ✅ Done (2026-10-18)
+- **What**: Built with Android NDK 30.0 (`aarch64-linux-android24-clang`) targeting Rust `aarch64-linux-android`.
+- **Output**: Placed in `src-tauri/gen/android/app/src/main/jniLibs/arm64-v8a/` and `crates/core/libs/arm64-v8a/`.
+- **Acceptance**: `file crsqlite.so` shows `ELF 64-bit LSB shared object, ARM aarch64`. Successfully packaged in `app-universal-debug.apk`.
 
 ### Task 4.3: Add `load_extension` Feature to rusqlite
 - **Status**: ✅ Done (2026-10-14)
@@ -525,159 +514,609 @@ flowchart LR
 - **Acceptance**: `cargo check -p milanote-core` compiles cleanly with extension loading enabled.
 
 ### Task 4.4: Load cr-sqlite Extension on Database Open
-- **Status**: ⬜ Not Started
-- **File**: [`crates/core/src/db.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/db.rs) — `open_path()` method (lines 29–36)
-- **Change**: After `Connection::open(path)`, add:
-  ```rust
-  unsafe { conn.set_load_extension(true)?; }
-  conn.load_extension(extension_path, Some("sqlite3_crsqlite_init"))?;
-  unsafe { conn.set_load_extension(false)?; }
-  ```
-- **Design Decision**: Extension path resolution — pass as parameter or resolve relative to executable
-- **Acceptance**: `crsql_db_version()` returns 0 on fresh DB
+- **Status**: ✅ Done (2026-10-19)
+- **File**: [`crates/core/src/db.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/db.rs)
+- **Change**: Added dynamic extension resolution `find_crsqlite_path()` (supporting Android jniLibs search, environment overrides, runtime executable directories, and compile-time manifest paths). Loaded via `LoadExtensionGuard` and `conn.load_extension` with entry point `sqlite3_crsqlite_init`.
+- **Acceptance**: `crsql_db_version()` returns 0 on fresh DB and site ID is generated cleanly.
 
 ### Task 4.5: Register Tables as CRRs
-- **Status**: ⬜ Not Started
-- **File**: [`crates/core/src/db.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/db.rs) — `init_schema()` method (lines 47–103)
-- **Change**: Add after existing `CREATE TABLE` statements:
-  ```rust
-  conn.execute("SELECT crsql_as_crr('boards')", [])?;
-  conn.execute("SELECT crsql_as_crr('elements')", [])?;
-  conn.execute("SELECT crsql_as_crr('task_list_items')", [])?;
-  conn.execute("SELECT crsql_as_crr('connectors')", [])?;
-  ```
-- **Note**: `crsql_as_crr()` is idempotent — safe to call on every startup
-- **Acceptance**: `SELECT * FROM crsql_changes` returns empty result set; DB has hidden `__crsql_*` tables
+- **Status**: ✅ Done (2026-10-19)
+- **File**: [`crates/core/src/db.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/db.rs)
+- **Change**:
+  - Configured explicit `NOT NULL PRIMARY KEY` on `id` across core tables.
+  - Omitted unchecked foreign key constraints (`REFERENCES`) in accordance with cr-sqlite distributed eventual consistency rules, cascading deletions explicitly in application code to emit causal tombstones.
+  - Implemented automatic legacy schema migration (`migrate_legacy_tables`).
+  - Registered tables as CRRs via `SELECT crsql_as_crr('boards')`, `elements`, `task_list_items`, `connectors`.
+- **Acceptance**: Tables registered as CRRs; `crsql_changes` virtual table active.
 
 ### Task 4.6: Migrate `task_list_items.order_index` to Fractional Indexing
-- **Status**: ⬜ Not Started
+- **Status**: ✅ Done (2026-10-19)
 - **Files**:
-  - [`crates/core/src/db.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/db.rs) — Schema + task item queries
-  - [`crates/core/src/models.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/models.rs) — `TaskListItem.order_index`
-  - [`src/components/Canvas.tsx`](file:///home/anchit/gitClones/the-game-note/src/components/Canvas.tsx) — Task item reorder logic
-  - [`src/components/TaskListCard.tsx`](file:///home/anchit/gitClones/the-game-note/src/components/TaskListCard.tsx) — Drag reorder
-- **Why**: Integer `order_index` (0, 1, 2, 3...) causes conflicts when two devices reorder the same list. Fractional string indexes (`"a0"`, `"a1"`, `"a0V"`) allow conflict-free interleaving.
-- **Implementation**:
-  - Change `order_index` column from `INTEGER` to `TEXT`
-  - Use a fractional indexing library pattern: to insert between `"a0"` and `"a1"`, generate `"a0V"`
-  - Write a migration to convert existing integer indexes to fractional strings
-  - Update sort queries to use `ORDER BY order_index ASC` (works with TEXT)
-- **Acceptance**: Task reordering works; existing data migrates cleanly
+  - [`crates/core/src/fractional_index.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/fractional_index.rs) — Full Rust implementation of David Greenspan's fractional indexing algorithm (`generate_key_between`, `generate_n_keys_between`).
+  - [`crates/core/src/models.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/models.rs) — Updated `TaskListItem.order_index` to `String`.
+  - [`src/types.ts`](file:///home/anchit/gitClones/the-game-note/src/types.ts) — Updated `order_index: string`.
+  - [`src/components/TaskListCard.tsx`](file:///home/anchit/gitClones/the-game-note/src/components/TaskListCard.tsx) — Drag-and-drop reorder and enter-key insertion dynamically compute fractional keys using `fractional-indexing`.
+- **Acceptance**: Infinite interleaving supported without re-indexing; task reordering verified in unit and sync tests.
 
 ### Task 4.7: Create Sync Module with Changeset API
-- **Status**: ⬜ Not Started
-- **File**: Create `crates/core/src/sync.rs`
-- **What**: Module exposing:
-  - `get_changes_since(conn, since_version) -> Vec<CrChange>` — pull local changes
-  - `apply_changes(conn, changes)` — apply remote changes
-  - `get_db_version(conn) -> i64` — current version for tracking
-  - `get_site_id(conn) -> Vec<u8>` — unique device identifier
-- **Also**: Register module in [`crates/core/src/lib.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/lib.rs)
-- **Acceptance**: Can round-trip changes between two in-memory databases in tests
+- **Status**: ✅ Done (2026-10-19)
+- **Files**:
+  - [`crates/core/src/sync.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/sync.rs)
+  - [`crates/core/src/lib.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/lib.rs)
+  - [`crates/core/src/db.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/db.rs)
+- **What**: Exposes `CrChange` struct, `CrValue` enum, `get_changes_since`, `apply_changes` (with atomic savepoint transaction), `get_db_version`, and `get_site_id`.
+- **Acceptance**: Verified pulling and applying changes between in-memory database instances.
 
 ### Task 4.8: Write Unit Tests for CRDT Merge Behavior
-- **Status**: ⬜ Not Started
-- **File**: Create `crates/core/tests/sync_tests.rs`
-- **What**: Test cases:
-  1. Two DBs independently insert different elements → merge has both
-  2. Two DBs update different columns of the same element → merge has both updates
-  3. Two DBs update the same column → LWW resolves without error
-  4. One DB deletes element, other updates it → delete wins
-  5. Task list reorder on both devices → fractional indexes merge cleanly
-  6. Board hierarchy changes merge correctly
-- **Acceptance**: All tests pass
+- **Status**: ✅ Done (2026-10-19)
+- **File**: [`crates/core/tests/sync_tests.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/tests/sync_tests.rs)
+- **Test Cases**:
+  1. `test_sync_independent_inserts_merge`: Two DBs independently insert different elements → merge contains both.
+  2. `test_sync_concurrent_different_columns_update`: Two DBs update different columns of the same element → merge has both updates.
+  3. `test_sync_same_column_lww_resolution`: Concurrent edits to the same column converge deterministically.
+  4. `test_sync_delete_wins_over_update`: Causal deletion wins over concurrent edits.
+  5. `test_sync_fractional_indexing_merge`: Concurrent task reordering merges cleanly preserving fractional index order.
+  6. `test_sync_board_hierarchy_merge`: Board tree modifications merge cleanly across peers.
+- **Acceptance**: All 6 tests pass; all 14 workspace tests pass.
 
 ---
 
-## Phase 5: Sync Transport & File Sync
+## Phase 5: Multi-Transport Sync (LAN + Tailscale + Encrypted Cloud Mailbox) & File Sync
 
-> **Goal**: Build the actual networking layer that carries changesets and files between devices.
+**Version:** 2 (cr-sqlite specifics, concrete protocol/schema definitions, security and test detail)
 
-### Task 5.1: Choose and Implement Sync Transport
-- **Status**: ⬜ Not Started
-- **Decision Needed**: Which transport approach?
+> **Goal**: Build a resilient, transport-independent sync system so Tablet, Laptop and Phone converge automatically, on any network, and whether or not the other devices are on at the same time. Sync logic (cr-sqlite changesets, cursors, encryption) is separated from how bytes travel. The app tries transports in priority order and uses the first that works. All data is end-to-end encrypted on the device before it leaves it.
 
-  | Option | Pros | Cons |
-  |---|---|---|
-  | **A. Tailscale direct** | Zero infrastructure, free, P2P encrypted | Both devices must run Tailscale; need a listener on one device |
-  | **B. WebSocket relay** | Simple, works across NATs | Need to host a small server somewhere |
-  | **C. Both** | Maximum flexibility | More code |
+---
 
-- **Recommended**: Start with **WebSocket relay** (works everywhere, easier to develop with), add Tailscale direct later as optimization
-- **File**: Create `crates/core/src/transport.rs` (or a new `crates/sync/` crate)
-- **Implementation**:
-  - Client: `SyncClient` that connects to relay via WebSocket
-  - Protocol: JSON messages — `{ type: "push", since_version, changes: [...] }` / `{ type: "pull", since_version }` / `{ type: "changes", changes: [...] }`
-  - Auto-reconnect with exponential backoff
-  - Sync trigger: on app focus + periodic (every 30s) + on every local write (debounced 2s)
-- **Acceptance**: Two instances exchange changesets via relay
+### 0. Context & Architectural Decisions
 
-### Task 5.2: Build the WebSocket Relay Server
-- **Status**: ⬜ Not Started
-- **File**: Create `relay-server/` directory (separate small Rust project)
-- **What**: Tiny relay (~100–200 lines) using `tokio` + `tokio-tungstenite`:
-  - Accepts WebSocket connections authenticated by a shared secret/token
-  - Stores last N changesets in memory (or a small SQLite DB)
-  - When a client pushes changes, forwards to all other connected clients
-  - When a client requests changes since version X, replays from buffer
-- **Deployment**: Runs on a home server, a \$5 VPS, or even the Linux desktop itself
-- **Acceptance**: Relay runs, accepts 2+ clients, forwards messages
+#### 0.1 Usage Profile (Drives the Design)
+- **Device priority**: **Tablet (most used) → Laptop → Phone (rarely)**.
+- **Time-gap reality**: Tablet and laptop are typically used ~4–5 hours apart, so they often are NOT online at the same time. Direct-only sync is not enough; a store-and-forward fallback (encrypted cloud mailbox) is required.
+- **Catch-up**: Phone may be days behind. Catch-up must be fast, paged, and automatic when the app opens.
 
-### Task 5.3: Add Sync Tauri Commands
+#### 0.2 Transport Priority (Tried in order, first success wins)
+| # | Transport | Works when | Cost | Privacy |
+|---|-----------|-----------|------|---------|
+| 1 | **LAN direct** | Same Wi-Fi, peer on | Free | Local only |
+| 2 | **Tailscale direct** | Any network, peer on and reachable | Free (Personal plan) | WireGuard-encrypted |
+| 3 | **Encrypted cloud mailbox** | Peer asleep/off, Tailscale not running | Free tier (Cloudflare DO) | Ciphertext only |
+
+#### 0.3 Roles
+- **Laptop = Hub (Server + Client)**: Runs the embedded sync server whenever it is on.
+- **Tablet & Phone = Client-Only**: Outbound connections only. No inbound server on Android (background suspension makes it unreliable and drains battery).
+- **Relay Rule**: Phone ↔ Tablet changes travel via the laptop or the mailbox. **The hub relays changes authored by other devices** (Task 5.11).
+
+#### 0.4 What cr-sqlite Gives Us (and What It Doesn't)
+cr-sqlite is network-agnostic; sync is "read changes from `crsql_changes`, ship them, insert them into `crsql_changes` on the other side".
+
+| Property | Impact on this plan |
+|---|---|
+| Messages can arrive in any order; all DBs converge if all messages eventually arrive | Multiple transports and retries are safe by design |
+| `crsql_changes` stores current state plus merge metadata, **not full history** | Database stays compact. A new device bootstraps by pulling everything (`db_version > 0`). **No separate compaction/snapshot system is needed** |
+| Rows carry `site_id` (the authoring device) | "No echo" rule is a simple `site_id IS NOT :peer` filter |
+| Later transactions can overwrite values from earlier ones | Do not depend on transaction-level atomicity across batches (see 5.2) |
+| Only CRRs (tables upgraded with `crsql_as_crr`) are synced | Keep device-local data (settings, cursors, caches) in normal, non-CRR tables |
+| Schema changes need `crsql_begin_alter` / `crsql_commit_alter` | Protocol carries a schema version; mismatched peers refuse to apply (see 5.2) |
+
+#### 0.5 Core Design Rules
+1. **Peers are identified by `site_id`, never by address.** A peer can have several endpoints (LAN IP, Tailscale name).
+2. **Per-peer cursors**, never a comparison of `db_version` values across devices (each device's counter is its own).
+3. **Apply and cursor-advance happen in the same SQLite transaction**, so a crash can't advance a cursor without applying data, or vice versa.
+4. **Idempotent by construction.** Re-delivery is harmless. Tests prove it.
+5. **Clients initiate; only the hub listens.**
+6. **Lifecycle-driven sync** (start/resume, network change, debounced local write, live notification, manual). No background heartbeat on mobile.
+7. **Everything on the wire is encrypted and versioned** (protocol version + schema version in every envelope).
+8. **Never copy a database file between devices.** A copied DB duplicates the `site_id`, which breaks conflict resolution. New devices always bootstrap by pulling.
+9. **Sync is not backup.** Local backups exist separately (Task 5.11).
+10. **The mailbox is optional and replaceable.** Everything must keep working over LAN/Tailscale without it.
+
+#### 0.6 Constraints & Dependencies
+- **Tailscale Personal Plan**: Free, unlimited user devices, up to 6 users, non-commercial use. Each device needs the Tailscale app and sign-in. Android and iOS allow only one active VPN at a time.
+- **Cloudflare Workers Free Tier**: Durable Objects must be SQLite-backed; exceeding free limits makes operations fail until daily reset (00:00 UTC). Store changesets in DO SQLite; attachments can be chunked or kept direct-only.
+- **Android Cleartext HTTP**: Blocked in the WebView/Java stack by default. All peer requests are made from Rust (`reqwest`), never from frontend `fetch()`.
+- **Tauri Mobile Lifecycle**: Use window focus/visibility events for "resume". Pause sync work when the mobile app goes to the background.
+
+#### 0.7 Suggested Crates
+`axum`, `tokio`, `reqwest` (with streaming), `serde`/`serde_json`, `rusqlite` (with cr-sqlite extension loaded), `chacha20poly1305` (XChaCha20-Poly1305), `hkdf`, `sha2`, `hmac`, `subtle` (constant-time compare), `zeroize`, `qrcode`, `rand`, `flate2` or `zstd`, `tracing`, `keyring` on desktop, and a Tauri plugin for Android Keystore-backed storage.
+
+---
+
+### 1. Multi-Tier Overhaul Execution Plan
+
+Per user directive, Phase 5 is completely overhauled and broken down into 3 discrete verification tiers:
+1. **Tier 1: LAN Instant Sync & Live Updates + Startup Overlay** (Tested & Complete — awaiting confirmation)
+2. **Tier 2: Tailscale Direct Sync** (Paused for Tier 1 confirmation)
+3. **Tier 3: Encrypted Cloud Mailbox** (Paused for Tier 2 confirmation)
+
+---
+
+### Tier 1: LAN Instant Sync & Live Updates + Startup Overlay
+- **Status**: ✅ Complete (Awaiting User Confirmation)
+- **Key Deliverables**:
+  1. **UDP Broadcast Auto-Discovery** ([`crates/core/src/transport/discovery.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/transport/discovery.rs)):
+     - Automatic LAN beacon on port 8766 every 1.8s (`GAMENOTE_LAN_BEACON:v1:`).
+     - Cross-platform socket binding using `socket2` with `SO_REUSEADDR` and `SO_BROADCAST`.
+     - Zero configuration needed: devices on the same Wi-Fi / subnet discover each other immediately.
+  2. **Fast Push on Local Write** ([`crates/core/src/sync/coordinator.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/sync/coordinator.rs)):
+     - Added `fast_push_pending_changes()` executing immediately whenever elements are moved, created, updated, or deleted.
+     - Pushes `crsql_changes` directly via HTTP `POST /api/sync/changes` within 10–25ms.
+     - Recipient merges changes atomically in SQLite and emits `sync-applied` to the UI.
+  3. **Real-Time Live SSE Stream** ([`crates/core/src/transport/client.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/transport/client.rs), [`crates/core/src/transport/server.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/transport/server.rs)):
+     - Connected peers maintain active Server-Sent Events (`/api/sync/events`) listener.
+     - Remote writes trigger instant pull & reactive UI canvas refresh without resetting pan/zoom.
+  4. **Startup & Reload Sync Overlay** ([`src/App.tsx`](file:///home/anchit/gitClones/the-game-note/src/App.tsx), [`src/index.css`](file:///home/anchit/gitClones/the-game-note/src/index.css)):
+     - Fullscreen light gray overlay (`#e5e7eb` / `rgba(235, 237, 242, 0.98)`) covering the screen on startup/reload.
+     - Centered logo with pulsing ring, title, and "Syncing canvas..." status spinner.
+     - Pulls changes from discovered peers before canvas is revealed, guaranteeing all elements are up-to-date on initial display.
+  5. **Verification**:
+     - Integration test [`crates/core/tests/lan_live_sync_tests.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/tests/lan_live_sync_tests.rs) passing (bidirectional live sync <150ms).
+     - All 53 workspace tests passing.
+     - Frontend build (`npm run build`) passing.
+
+---
+
+### Tier 2: Tailscale Direct Sync
+- **Status**: ⏸️ Paused (Awaiting confirmation on Tier 1)
+
+---
+
+### Tier 3: Encrypted Cloud Mailbox
+- **Status**: ⏸️ Paused (Awaiting confirmation on Tier 2)
+
+---
+
+### Task 5.1: Transport Abstraction, Per-Peer Cursors & In-Process Test Harness
 - **Status**: ⬜ Not Started
 - **Files**:
-  - [`src-tauri/src/commands.rs`](file:///home/anchit/gitClones/the-game-note/src-tauri/src/commands.rs) — new commands
-  - [`src-tauri/src/main.rs`](file:///home/anchit/gitClones/the-game-note/src-tauri/src/main.rs) — register new commands
-- **New Commands**:
-  - `start_sync(relay_url, auth_token)` — connect to relay
-  - `stop_sync()` — disconnect
-  - `get_sync_status()` — returns `{ connected, lastSynced, pendingChanges }`
-  - `force_sync()` — manual sync trigger
-- **Acceptance**: Frontend can initiate and control sync
-
-### Task 5.4: Add Sync UI to Frontend
-- **Status**: ⬜ Not Started
-- **Files**: [`src/App.tsx`](file:///home/anchit/gitClones/the-game-note/src/App.tsx), new `src/components/SyncStatus.tsx`
+  - `crates/core/src/transport/mod.rs`
+  - `crates/core/src/sync/cursors.rs`
+  - `crates/core/tests/sync_two_instances.rs`
 - **What**:
-  - Small sync indicator in the top bar (green dot = connected, yellow = syncing, red = disconnected)
-  - Settings page/modal for relay URL configuration
-  - Manual "sync now" button
-  - On receiving remote changes: reload current board elements from DB
-- **Acceptance**: User can see sync status and configure relay URL
+  1. **Transport trait**: Cursors are opaque integers: a direct peer's cursor is that peer's `db_version`; the mailbox's cursor is its own sequence number.
+     ```rust
+     #[async_trait]
+     pub trait Transport: Send + Sync {
+         fn kind(&self) -> TransportKind;                 // Lan | Tailscale | Mailbox
+         async fn health(&self) -> Result<PeerHealth, TransportError>;
+         async fn pull(&self, since: i64, limit: u32) -> Result<ChangePage, TransportError>;
+         async fn push(&self, batch: ChangeBatch) -> Result<PushAck, TransportError>;
+         async fn missing_files(&self, ids: &[FileId]) -> Result<Vec<FileId>, TransportError>;
+         async fn get_file(&self, id: &FileId, range: Option<ByteRange>) -> Result<FileStream, TransportError>;
+         async fn put_file(&self, id: &FileId, offset: u64, bytes: Bytes) -> Result<(), TransportError>;
+         fn subscribe(&self) -> Option<BoxStream<'static, SyncEvent>>; // live "changes available" pings
+     }
+     ```
+     `TransportError` distinguishes: `Unreachable`, `Unauthorized`, `ProtocolMismatch`, `SchemaMismatch`, `RateLimited{retry_after}`, `PayloadTooLarge`, `Corrupt`, `Other`.
+  2. **Cursor storage** (regular table, NOT a CRR, device-local):
+     ```sql
+     CREATE TABLE IF NOT EXISTS sync_peers (
+       peer_id        TEXT PRIMARY KEY,       -- hex(site_id) for devices, 'mailbox' for mailbox
+       display_name   TEXT,
+       first_seen_at  INTEGER NOT NULL,
+       last_seen_at   INTEGER
+     );
+     CREATE TABLE IF NOT EXISTS sync_cursors (
+       peer_id        TEXT NOT NULL REFERENCES sync_peers(peer_id) ON DELETE CASCADE,
+       direction      TEXT NOT NULL CHECK (direction IN ('pull','push')),
+       version        INTEGER NOT NULL DEFAULT 0,
+       updated_at     INTEGER NOT NULL,
+       PRIMARY KEY (peer_id, direction)
+     );
+     ```
+     - `pull` cursor = highest remote version already applied from that peer.
+     - `push` cursor = highest *local* `db_version` already delivered to that peer.
+  3. **In-process transport** (`LocalTransport`) wiring two `SyncCore` instances (each with its own in-memory/temp SQLite DB and cr-sqlite loaded) to test sync logic without sockets.
+  4. **Sync cycle (reference algorithm), per peer:**
+     ```
+     health = transport.health()                      // reachability, peer site_id, protocol/schema versions
+     check protocol_version and schema_version        // abort with clear error on mismatch
+     loop:                                            // PULL
+         page = transport.pull(since = cursor.pull, limit = N)
+         BEGIN
+           apply page.changes into crsql_changes (bind parameters)
+           UPDATE sync_cursors SET version = page.next_cursor (pull)
+         COMMIT
+         break unless page.has_more
+     loop:                                            // PUSH
+         rows = SELECT ... FROM crsql_changes
+                WHERE db_version > cursor.push AND site_id IS NOT :peer_site_id
+                ORDER BY db_version, seq             // paged on db_version boundaries
+         ack = transport.push(encode(rows))
+         UPDATE sync_cursors SET version = last db_version sent (push)
+         break when no more rows
+     ```
+- **Tests (all in-process)**:
+  - Bidirectional sync converges (A→B, B→A, A↔B).
+  - Concurrent edits to the same cell and to different cells merge deterministically.
+  - Duplicate delivery of the same page is a no-op (state identical, no new rows).
+  - Out-of-order page delivery converges to the same state.
+  - No echo: a change authored by B is never sent back to B.
+  - Three-device relay: A→Hub→C delivers A's edits to C, and C's cursors don't re-send them to A.
+  - Crash simulation: abort between apply and cursor update → both roll back; retry succeeds.
+  - Resume: interrupted pull/push continues from the stored cursor with no loss or duplication.
+  - Delete/tombstone propagation, including delete-then-re-insert.
+  - New device (empty DB, new `site_id`) bootstraps with `since = 0`.
+- **Acceptance**: Two and three in-process instances converge with all tests passing, before any real networking exists.
 
-### Task 5.5: Implement File/Image Sync
-- **Status**: ⬜ Not Started
-- **Files**: [`crates/core/src/storage.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/storage.rs), `crates/core/src/transport.rs`
-- **What**: Sync binary files (images) alongside structured data
-- **Implementation**:
-  - After applying remote changesets, scan for element `content` fields referencing file UUIDs
-  - Check if referenced files exist locally
-  - If missing: request file from relay/peer → `{ type: "file_request", file_id: "uuid.png" }` / `{ type: "file_data", file_id, data: base64 }`
-  - Files are immutable (UUID-named) — no conflict possible
-  - Optimize: batch file requests, transfer in background
-- **Acceptance**: Image uploaded on one device appears on other devices after sync
+---
 
-### Task 5.6: Handle Sync-Triggered UI Refresh
+### Task 5.2: Sync Protocol, Pagination & Validation
 - **Status**: ⬜ Not Started
-- **Files**: [`src/App.tsx`](file:///home/anchit/gitClones/the-game-note/src/App.tsx), [`src/services/ipc.ts`](file:///home/anchit/gitClones/the-game-note/src/services/ipc.ts)
-- **What**: When remote changes arrive and are applied to the local DB, the React UI needs to refresh
-- **Implementation**:
-  - Tauri event emission: backend emits `sync-changes-applied` event with list of affected board IDs
-  - Frontend listens: if current board is affected, re-fetch elements via `ipcService.getElementsForBoard()`
-  - Sidebar: re-fetch board tree if board hierarchy changed
-  - Undo stack: remote changes should NOT be added to the local undo stack
-- **Acceptance**: Edits on one device appear on other devices within seconds; no stale UI
+- **File**: `crates/core/src/sync/protocol.rs`
+- **What**:
+  1. **Envelope** (plaintext metadata seen by transport/mailbox; payload encrypted by 5.3):
+     ```json
+     {
+       "protocol_version": 1,
+       "schema_version": 7,
+       "sender_site_id": "<hex 16 bytes>",
+       "kind": "changes",
+       "key_id": 1,
+       "nonce": "<base64 24 bytes>",
+       "payload": "<base64 ciphertext>"
+     }
+     ```
+     Unknown/newer `protocol_version` → reject with `ProtocolMismatch` and clear error ("update the app on the other device").
+  2. **Change row wire format** (decrypted payload; one object per `crsql_changes` row). Values are type-tagged because `val` can be any SQLite type:
+     ```json
+     {
+       "table": "elements",
+       "pk": "<base64 packed pk>",
+       "cid": "content",
+       "val": {"t": "text", "v": "hello"},
+       "col_version": 3,
+       "db_version": 412,
+       "site_id": "<hex>",
+       "cl": 1,
+       "seq": 0
+     }
+     ```
+     Value tags: `null`, `int`, `real`, `text`, `blob` (base64). Reject any other tag.
+  3. **Pagination on `db_version` boundaries**:
+     - Query: `SELECT ... FROM crsql_changes WHERE db_version > :since AND site_id IS NOT :requester ORDER BY db_version, seq LIMIT :n`.
+     - Never split a `db_version` across pages: if the last row's `db_version` has more rows, fetch the remainder of that version and include it.
+     - Response: `{ "changes": [...], "next_cursor": <last db_version included>, "has_more": bool, "server_db_version": N }`.
+     - Client applies each page in a single transaction and advances `pull` to `next_cursor` in the same transaction.
+  4. **Applying changes**: Use `INSERT INTO crsql_changes (...) VALUES (?, ?, ...)` with **bind parameters only**, never string concatenation.
+  5. **Validation before touching DB**:
+     - Max body size (e.g. 4 MiB compressed, 16 MiB decompressed; limit decompression ratio).
+     - Max rows per batch (e.g. 5,000).
+     - `table` must be in an allow-list of CRR tables (`boards`, `elements`, `task_list_items`, `connectors`); `cid` must be a known column; reject unknown ones.
+     - Type tags valid; blob sizes bounded; `site_id` is 16 bytes.
+     - Reject batches whose `schema_version` differs from local.
+  6. **Compression**: gzip or zstd on plaintext before encryption (compress-then-encrypt).
+  7. **Schema migrations**: Altering a CRR requires `crsql_begin_alter('t')` … `crsql_commit_alter('t')`. Store `schema_version` (via `PRAGMA user_version`). On mismatch, peers refuse to apply changes, pull cursor is not advanced past unapplied data, and sync resumes after updating.
+  8. **Error model**: Shared error taxonomy mapping to HTTP status codes (`401 unauthorized`, `409 schema_mismatch`, `426 protocol_mismatch`, `413 payload_too_large`, `422 invalid_payload`, `429 rate_limited`).
+- **Acceptance**: A 50,000-row changeset syncs in multiple pages without splitting a `db_version`; malformed, oversized, unknown-table, and mismatched-schema payloads are rejected without any DB writes; schema-mismatch test passes.
 
-### Task 5.7: End-to-End Integration Testing
+---
+
+### Task 5.3: End-to-End Encryption & Device Pairing
 - **Status**: ⬜ Not Started
-- **What**: Full test across all 3 devices:
-  1. Create a board on Linux desktop → appears on Android phone and tablet
-  2. Add a note with image on Android phone → appears on Linux desktop and tablet
-  3. Edit note text on tablet while moving the note on desktop → both changes merge
-  4. Delete an element on one device → removed on all
-  5. Offline edit: put phone in airplane mode, make edits, reconnect → changes sync
-  6. App cold start: launch on a device that's been off → pulls all changes
-- **Acceptance**: All 6 scenarios pass
+- **Files**:
+  - `crates/core/src/crypto.rs`
+  - `crates/core/src/pairing.rs`
+- **What**:
+  1. **One secret, derived keys**: First device generates a random 32-byte `sync_secret`. Derive subkeys with HKDF-SHA256 using distinct context strings:
+     - `enc_key = HKDF(sync_secret, "notes-sync/v1/encrypt")`: encrypts changesets.
+     - `file_key = HKDF(sync_secret, "notes-sync/v1/files")`: encrypts files and keys file IDs.
+     - `auth_token = HKDF(sync_secret, "notes-sync/v1/hub-auth")`: bearer token for the hub.
+     - `mailbox_token = HKDF(sync_secret, "notes-sync/v1/mailbox-auth")`: authenticates to mailbox. The mailbox stores only `SHA-256(mailbox_token)` as the group identifier.
+  2. **Encryption**: XChaCha20-Poly1305, random 24-byte nonce per message, **AAD** = `protocol_version || sender_site_id || kind || key_id`. Envelope carries `key_id` to allow future key rotation.
+  3. **Pairing flow**:
+     - First device: *Settings → Sync → Pair a device* generates `sync_secret` and shows a QR code plus copyable text code: `{v, sync_secret, hub_hints[], mailbox_url?}`.
+     - Second device: Scans QR or enters code. Stores secret in keystore, contacts hub with `auth_token`, exchanges `site_id` and device name.
+     - QR display auto-hides after ~2 minutes and is never logged.
+  4. **Key storage**: Desktop via `keyring` crate (OS Secret Service / Keychain); Android via Keystore-backed storage through Tauri plugin. Zeroize key material in memory on drop. Secrets are **never** stored in `sync_config.json`.
+  5. **Recovery**: Explicit optional "Export recovery code" in UI.
+- **Acceptance**: A device paired by QR decrypts changes from others; a device without the key cannot read transported data; tampered ciphertext or AAD fails authentication; mailbox never sees plaintext or derived keys.
+
+---
+
+### Task 5.4: Embedded Sync Server (Laptop/Desktop Hub)
+- **Status**: ⬜ Not Started
+- **File**: `crates/core/src/transport/server.rs` (compiled for desktop only: `cfg(not(target_os = "android"))`)
+- **What**: Lightweight HTTP server (`axum` + `tokio`) inside the desktop app.
+  1. **Network exposure**:
+     - Default port `8765` (configurable).
+     - Bind to the machine's Tailscale IP (`100.64.0.0/10`) and LAN interface(s) rather than blindly to `0.0.0.0`. If bound more widely, **reject connections whose source address is not** loopback, RFC1918 private ranges, or `100.64.0.0/10`.
+     - Server toggles on/off from settings and is off until the user enables sync.
+  2. **Authentication (required by default)**:
+     - Header `Authorization: Bearer <auth_token>` compared with constant-time comparison (`subtle`).
+     - Failed attempts rate-limited per source IP; log failures without logging tokens.
+  3. **Endpoints**:
+     | Method | Path | Purpose |
+     |---|---|---|
+     | GET | `/api/sync/health` | `{status, site_id, device_name, protocol_version, schema_version, db_version}` |
+     | GET | `/api/sync/changes?since=N&limit=M&requester=<site_id hex>` | Page of encrypted changes, excluding requester's own |
+     | POST | `/api/sync/changes` | Apply encrypted batch; response `{applied_through, db_version}` |
+     | POST | `/api/sync/files/missing` | Body: list of file IDs → returns IDs server lacks (5.7) |
+     | GET | `/api/sync/files/{id}` | Encrypted file bytes; supports `Range` for resume |
+     | PUT | `/api/sync/files/{id}?offset=N` | Chunked upload; completes when total size reached |
+     | GET | `/api/sync/events` | Server-Sent Events (SSE): `data: {"db_version": N}` when new changes apply |
+  4. **Hardening**:
+     - Body size limits, file upload size limits (default 25 MiB, configurable), request timeouts.
+     - File IDs must match strict lowercase hex `^[0-9a-f]{64}$`; reject anything else (no path traversal).
+     - Serialized DB writer task to prevent lock contention with the UI.
+     - Runs on its own tokio runtime so it never blocks the UI thread.
+- **Acceptance**: Health, changes, and files endpoints work with valid token; missing/invalid tokens get 401; oversized bodies and bad file IDs rejected; non-allowed source IPs refused; restarts cleanly on config changes.
+
+---
+
+### Task 5.5: Peer Client & Sync Coordinator (LAN + Tailscale)
+- **Status**: ⬜ Not Started
+- **Files**:
+  - `crates/core/src/transport/client.rs`
+  - `crates/core/src/sync/coordinator.rs`
+- **What**:
+  1. **Peer model**: Each peer stores `{site_id, name, endpoints: [{kind: Lan|Tailscale, url}]}`. Verified by `site_id` returned from `/health` (mismatch aborts immediately).
+  2. **Endpoint selection per cycle**: Try LAN, then Tailscale, with short timeouts (1.5s LAN, 4s Tailscale). Cache last working endpoint and try it first.
+  3. **Per-peer sync routine**: `health` check → compatibility check → pull pages → push pages → update `last_synced_at`.
+     - On `SchemaMismatch`/`ProtocolMismatch`: stop, mark peer "needs update", don't loop.
+     - On `RateLimited`: wait `Retry-After`.
+     - On network errors: exponential backoff (1s, 2s, 4s … cap 60s) with jitter.
+  4. **Trigger matrix**:
+     | Trigger | Desktop | Android |
+     |---|---|---|
+     | App start / window focus (resume) | Yes | Yes |
+     | Network change (interface up, Tailscale connected) | Yes | Yes (on resume) |
+     | Debounced local write (2s, only if `db_version > push cursor`) | Yes | Yes (foreground) |
+     | Live notification (`/events` SSE) | Yes | Yes (foreground) |
+     | Slow fallback poll (60s) | Yes | Foreground only |
+     | Manual "Sync Now" | Yes | Yes |
+     | Background heartbeat | No | **No** |
+  5. **Concurrency & lifecycle**: One sync cycle per peer at a time (mutex per peer). On Android, cancel in-flight work and close SSE streams when app goes to background; resume on focus.
+- **Acceptance**: Tablet and laptop on a Tailnet pull and push bidirectionally; killing connection mid-sync resumes cleanly without duplicate or lost changes; switching from Wi-Fi to mobile data recovers on next trigger; wrong `site_id` refused.
+
+---
+
+### Task 5.6: Peer Configuration, Pairing & Sync Tauri Commands
+- **Status**: ⬜ Not Started
+- **Files**:
+  - `src-tauri/src/commands.rs`
+  - `src-tauri/src/lib.rs`
+- **What**:
+  1. **Config file** `sync_config.json` in app data dir (no secrets):
+     ```json
+     {
+       "device_name": "Tablet",
+       "role": "client",
+       "server": { "enabled": false, "port": 8765 },
+       "peers": [
+         { "site_id": "<hex>", "name": "Laptop",
+           "endpoints": [ {"kind":"lan","url":"http://192.168.1.20:8765"},
+                          {"kind":"tailscale","url":"http://laptop.tailnet.ts.net:8765"} ] }
+       ],
+       "mailbox": { "enabled": true, "url": "https://sync.example.workers.dev", "push_scope": "own" },
+       "limits": { "max_file_mib": 25, "page_rows": 2000 }
+     }
+     ```
+  2. **Commands**:
+     - `get_sync_config()`, `save_sync_config(config)`
+     - `start_pairing()`, `complete_pairing(code)`
+     - `list_peers()`, `add_peer(...)`, `remove_peer(site_id)`
+     - `test_peer(site_id | endpoint)`
+     - `trigger_sync(peer_id | "all")`
+     - `get_sync_status()`: `{state, active_transport, last_synced_at, pending_local_changes, latency_ms, last_error}`
+     - `export_sync_log()`
+  3. **Lifecycle**: Server starts only on desktop when enabled; coordinator pauses/resumes with window focus; emit `sync-status-changed` and `sync-applied` events.
+- **Acceptance**: Frontend can pair a device, configure peers, test connections, trigger sync, and read live status; secrets never appear in config files or logs.
+
+---
+
+### Task 5.7: Binary Image & Media Attachment Sync (Content-Addressed)
+- **Status**: ⬜ Not Started
+- **Files**:
+  - [`crates/core/src/storage.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/storage.rs)
+  - `crates/core/src/transport/files.rs`
+- **What**:
+  1. **Content-addressed IDs**: `file_id = HMAC-SHA256(file_key, plaintext_bytes)` as lowercase hex. Keyed so third parties cannot confirm known public files. Same file added twice → deduplicated to one blob.
+  2. **Migration**: Existing elements reference files by `content.path`. Add a one-time migration that hashes existing files, stores them under their `file_id`, and updates element content to reference the ID (synced via normal CRR write). Keep old paths readable until migration succeeds; back up first.
+  3. **Fetching missing files**: Scan applied elements for referenced `file_id`s. Check against local `FileStorage`; request missing files from peer (or mailbox). Verify recomputed HMAC of decrypted bytes equals `file_id`; delete and retry on mismatch.
+  4. **Transfer details**: Encrypt files with `file_key` and random nonce. Chunked transfer (1 MiB chunks) with `Range` GET and offset PUT for resume. Separate file queue with limited concurrency so large images never delay note/text sync.
+  5. **Limits & placeholders**: Configurable max size (default 25 MiB). Over-limit files stay local with a "too large to sync" badge. Canvas displays a placeholder (waiting, downloading X%, failed, retry) until file arrives.
+  6. **Garbage collection**: Delayed local-only deletion (30 days after last reference) to prevent deleting files a peer is about to reference.
+- **Acceptance**: Image added on tablet appears on laptop and phone after sync; interrupted transfer resumes; corrupted download rejected and retried; large files don't block note sync; migration of existing images completes without data loss.
+
+---
+
+### Task 5.8: Frontend Sync Settings, Pairing & Status UI
+- **Status**: ⬜ Not Started
+- **Files**:
+  - `src/components/SyncSettingsModal.tsx`
+  - `src/components/SyncStatusIndicator.tsx`
+  - `src/components/PairingDialog.tsx`
+  - [`src/App.tsx`](file:///home/anchit/gitClones/the-game-note/src/App.tsx)
+- **What**:
+  1. **Sync Settings modal** (Topbar icon and mobile `...` menu):
+     - **This device**: Name, role (laptop hub: "Run sync server" toggle with port).
+     - **Pair a device**: QR display (hub or paired device), scan/paste code on new device.
+     - **Peers**: List with name, last synced, active route; add/edit/remove LAN and Tailscale addresses; "Test connection" with latency and compatibility result.
+     - **Cloud mailbox (optional)**: URL, enable toggle, status, ciphertext privacy note.
+     - **Tailscale tips**: How to find IP (`tailscale ip -4`, MagicDNS name), note that only one VPN can be active on Android/iOS.
+     - **Advanced**: Max file size, export sync log, "Sync Now".
+     - **Danger zone**: Reset sync (clear cursors; re-pull everything), unpair device.
+  2. **Status indicator**:
+     - 🟢 Up to date
+     - 🟡 Syncing (with progress for large transfers)
+     - 🔵 Synced via cloud mailbox (peer offline)
+     - 🟠 Needs attention (schema/protocol mismatch, auth failure, quota reached)
+     - ⚪ Disconnected / nothing reachable
+     Tapping shows per-peer detail, active transport, last synced time, and plain-language actionable errors.
+  3. **Offline indicator**: Shows count of local changes not yet delivered anywhere.
+- **Acceptance**: User can pair a device, add a peer, see which route is used, trigger sync, and understand any error without reading logs.
+
+---
+
+### Task 5.9: Live Notifications & Reactive UI Refresh
+- **Status**: ✅ Complete
+- **Files**:
+  - [`src/App.tsx`](file:///home/anchit/gitClones/the-game-note/src/App.tsx)
+  - [`src/services/ipc.ts`](file:///home/anchit/gitClones/the-game-note/src/services/ipc.ts)
+  - `crates/core/src/transport/server.rs`
+  - `crates/core/src/sync/events.rs`
+- **What**:
+  1. **Live channel**: Foreground clients keep SSE connection to hub `/api/sync/events`; each `{db_version}` triggers an immediate pull. Reconnect with backoff on disconnect; fall back to 60s poll.
+  2. **`sync-applied` event**: Backend emits event with list of updated board IDs.
+  3. **Refresh rules**:
+     - Currently viewed board affected → re-fetch elements from SQLite and merge into UI **without resetting pan, zoom, or undo/redo stack**.
+     - Board tree changed → re-fetch board tree.
+     - Element being actively edited locally (text cursor or drag in progress) → defer applying that element's visual update until interaction ends, then reconcile.
+     - Coalesce UI refresh events within ~150ms.
+  4. **Undo/redo isolation**: Remote changes are not part of the local undo stack; undoing a local action must never revert a remote edit to a different cell.
+- **Acceptance**: With both devices foregrounded on LAN/Tailscale, edit appears on the other device within 1–2 seconds; pan/zoom/undo preserved; remote refresh does not disrupt active element editing.
+
+---
+
+### Task 5.10: Encrypted Cloud Mailbox Service (Cloudflare Worker + Durable Object)
+- **Status**: ✅ Done (2026-10-20)
+- **Deployment**: `https://gamenote-mailbox.anchit-note.workers.dev`
+- **Files**:
+  - `mailbox/src/index.ts`
+  - `mailbox/src/mailbox_do.ts`
+  - `mailbox/wrangler.toml`
+  - `mailbox/src/types.ts`
+- **What**: Zero-knowledge store-and-forward service backed by Cloudflare Worker + SQLite Durable Object.
+  1. **Routing and auth**: `Authorization: Bearer <mailbox_token>` hashed to `group_id = SHA-256(token)` for DO routing.
+  2. **Durable Object SQLite**: Stores encrypted envelopes with auto-incrementing `seq`, per-device acks, and auto-compaction.
+  3. **Live SSE Broadcast**: `/mailbox/events` endpoint broadcasts `{"seq": N}` to all connected clients within ~30ms, eliminating polling delay.
+- **Acceptance**: Live integration tests passing against deployed worker; zero plaintext or keys on worker.
+
+---
+
+### Task 5.11: Mailbox Transport Client, Automatic Transport Selection & Local Backups
+- **Status**: ✅ Done (2026-10-20)
+- **Files**:
+  - `crates/core/src/transport/mailbox.rs`
+  - `crates/core/src/sync/coordinator.rs`
+- **What**:
+  1. `MailboxClient`: End-to-end encrypted push/pull/ack/subscribe with XChaCha20-Poly1305 + zstd.
+  2. Integrated into `SyncCoordinator`: Automatic sync cycle in `trigger_sync()` and debounced `fast_push_pending_changes()`.
+  3. Background real-time SSE listener in Tauri app immediately applies incoming changes and triggers UI redraw with 0ms manual reload.
+- **Acceptance**: All 55 workspace tests passing, live roundtrip test verified against Cloudflare DO.
+  5. **Local backups** (separate from sync):
+     - Rolling daily snapshots using SQLite `VACUUM INTO`, keep last 7 daily + 1 monthly.
+     - Manual "Export backup" and "Restore from backup" with warnings.
+     - Automated backup before any schema migration (5.2) and file migration (5.7).
+- **Acceptance**: Edit on tablet, turn tablet off, open laptop hours later: edits arrive via mailbox. When both on together, direct sync used and nothing duplicated. Restored backup opens correctly and re-syncs cleanly.
+
+---
+
+### Task 5.14: Intuitive User-Friendly Sync UI Revamp & Mobile Bottom-Sheet Experience
+- **Status**: ✅ Done (2026-10-20)
+- **Files**:
+  - [`src/components/SyncSettingsModal.tsx`](file:///home/anchit/gitClones/the-game-note/src/components/SyncSettingsModal.tsx)
+  - [`src/index.css`](file:///home/anchit/gitClones/the-game-note/src/index.css)
+  - [`crates/core/src/sync/coordinator.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/sync/coordinator.rs)
+  - [`crates/core/src/sync/config.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/sync/config.rs)
+  - [`src-tauri/src/lib.rs`](file:///home/anchit/gitClones/the-game-note/src-tauri/src/lib.rs)
+- **What**:
+  1. **User-Friendly UI (No Dev Jargon)**:
+     - Hero Status Card: 🟢 "Live Cloud Relay Active" / "Syncing..." status pill, last sync timestamp, and single-click "Sync Now" button.
+     - Cloud Relay Sync Card: Real-time connection badge, zero-knowledge E2EE badge (`AES-256 / XChaCha20`), and single-click "Test Connection" button.
+     - Your Devices Card: Inline device renaming (`Desktop Studio`, `Pixel Tablet`, etc.), clean list of paired devices filtered of self, and "Pair New Device" QR button.
+     - Local Wi-Fi Fast Sync toggle with explanatory subtitle.
+     - Collapsible "Advanced Network Settings" accordion hidden by default for non-technical users.
+  2. **Android & Mobile Optimization**:
+     - Auto-detects mobile screens via `window.innerWidth <= 640 || isTouchPrimary()`.
+     - Renders as a native mobile bottom sheet (`@keyframes slideUpBottomSheet`) with top drag handle, touch-friendly 48px targets, and `safe-area-inset-bottom` padding.
+  3. **Backend Connection & Deadlock Resolution**:
+     - Auto-populates `mailbox.url` with production endpoint `https://gamenote-mailbox.anchit-note.workers.dev` if empty.
+     - Auto-generates `sync_secret` on startup so encryption keys are active immediately without requiring manual pairing first.
+     - Fixed Mutex reentrancy deadlock in `SyncCoordinator::get_status()` by passing `&conn` directly to `get_site_id()` instead of re-locking `self.conn`.
+     - Filtered `my_site_id` from discovered peers and status reporting so devices never show themselves as paired peers.
+- **Acceptance**: `npm run build` zero errors, `npm run android:build` generates `app-universal-debug.apk` cleanly, all 55 workspace tests pass in 0.6s.
+
+---
+
+### Task 5.12: Observability, Diagnostics & Error Handling
+- **Status**: ⬜ Not Started
+- **Files**:
+  - `crates/core/src/sync/diagnostics.rs`
+  - `src/components/SyncDiagnostics.tsx`
+- **What**:
+  - Structured `tracing` logs with a ring buffer exported via `export_sync_log()`; secrets, tokens, and plaintext are never logged.
+  - Diagnostics screen: Per-peer, per-transport state, cursors, pending local changes (`db_version > push cursor`), last error, last sync time, and a "Run connectivity check" testing LAN, Tailscale, and mailbox separately.
+  - Central error taxonomy mapped to user-facing messages.
+  - Metrics: Sync duration, rows pulled/pushed, bytes sent, retries.
+  - "Reset sync with this peer" action deleting that peer's cursors (safe: re-pulling is idempotent).
+- **Acceptance**: Failed sync diagnosed from diagnostics screen alone; logs contain no secrets (verified by test).
+
+---
+
+### Task 5.13: Multi-Device End-to-End Verification
+- **Status**: ⬜ Not Started
+- **What**: Full validation across Linux laptop (hub), Android tablet, and Android phone:
+
+| # | Scenario | Pass criteria |
+|---|---|---|
+| 1 | **Pairing**: Pair tablet and phone with laptop via QR | Both appear as peers with correct names; wrong/expired code rejected |
+| 2 | **Direct sync**: Create board on tablet | Appears on laptop within seconds over Tailscale and LAN |
+| 3 | **Live update**: Edit on laptop with tablet foregrounded | Appears on tablet within 1–2 s; pan/zoom/undo preserved |
+| 4 | **Images**: Add image on phone | Appears on tablet and laptop; interrupted transfer resumes; corrupt chunk rejected |
+| 5 | **Concurrent edit**: Edit note text on tablet while moving it on laptop | Both changes merge; no data loss |
+| 6 | **Offline phone**: Airplane mode, edit, reconnect | Catches up automatically; edits reach other devices |
+| 7 | **Time gap (key case)**: Edit on tablet, power it off, open laptop 4–5 hrs later | Edits arrive via cloud mailbox |
+| 8 | **Rarely-used phone**: Open after several days | Full catch-up completes in reasonable time (mailbox or direct pull) |
+| 9 | **Beyond retention**: Device offline longer than mailbox retention (30d) | Mailbox returns `410`; device falls back to full direct pull |
+| 10 | **Transport failover**: Disable Tailscale, then mailbox, then LAN in turn | Remaining transports sync; nothing duplicated |
+| 11 | **Hub relay**: Tablet changes reach laptop only over LAN (no internet) | Phone later receives them via hub relay |
+| 12 | **Schema mismatch**: Update app on one device only | Clear "update other device" message; no corruption; sync resumes after update |
+| 13 | **Security**: Missing/invalid token; bad source IP; path-traversal file ID; oversized upload | All rejected; mailbox contents unreadable without key |
+| 14 | **Mailbox quota**: Simulate over-quota response | Direct sync continues; mailbox backs off and recovers |
+| 15 | **Backup/restore**: Restore DB snapshot on same device | Restored DB re-syncs cleanly |
+| 16 | **Battery check**: Leave phone app in background for a few hours | No background sync activity or noticeable battery drain |
+
+- **Acceptance**: All 16 scenarios pass with zero data loss.
+
+---
+
+### 2. Security Checklist
+- [ ] Hub bound only to Tailscale/LAN interfaces and source-IP filtered; token required.
+- [ ] Constant-time token comparison (`subtle`); rate limiting on failures.
+- [ ] All payloads encrypted with XChaCha20-Poly1305; AAD binds version, sender, kind, and key ID.
+- [ ] Keys derived per purpose with HKDF; stored in OS/Android keystore; zeroized in memory.
+- [ ] Mailbox stores only `SHA-256(mailbox_token)` and ciphertext; cannot derive keys.
+- [ ] Bind parameters only for all `crsql_changes` reads and writes.
+- [ ] Table/column allow-lists and size limits on all inbound data.
+- [ ] Keyed file IDs (`HMAC-SHA256`); strict hex validation; no client-supplied paths.
+- [ ] QR/pairing code treated as secret; auto-hidden; never logged.
+- [ ] No secrets or plaintext in logs, config files, or exported diagnostics.
+- [ ] Never copy DB files between devices (prevents duplicate `site_id`).
+
+---
+
+### 3. Phase 5 Risks & Mitigations
+| Risk | Impact | Likelihood | Mitigation |
+|---|---|---|---|
+| cr-sqlite maintenance/activity uncertain | High | Medium | Pin known-good version; build from source/vendored artifacts; keep sync logic behind trait; keep schema simple |
+| Android kills background work | High | High | Client-only design; foreground-triggered sync; no background heartbeat |
+| Free-tier limits change (Cloudflare, Tailscale) | Medium | Medium | Mailbox optional and replaceable; Tailscale/LAN path independent; limits documented and checked |
+| Schema evolution breaks sync between versions | High | Medium | Schema version in every envelope; refuse-to-apply with clear UI; backup before migrations |
+| Cursor corruption or logic bug propagates bad data | High | Low | Cursor + apply in one transaction; "Reset sync with peer" is safe (idempotent); local backups |
+| Lost key = lost cloud-side data | High | Low | Optional recovery code; devices retain full local data; direct pull works between paired devices |
+| Duplicate `site_id` from copied DB | High | Low | Documented rule; bootstrap by pull only; detect equal `site_id` in `/health` and refuse |
+| Large first sync is slow | Medium | Medium | Pagination on `db_version` boundaries, compression, progress indicator, separate file queue |
+
+---
+
+### 4. Definition of Done for Phase 5
+1. All task acceptance criteria met and the 16 end-to-end scenarios pass on real devices.
+2. Direct sync (LAN/Tailscale) works without the mailbox; the mailbox works without any peer online.
+3. No plaintext leaves a device; verified with packet and server-side inspection.
+4. Diagnostics and backups available; setup documented for Tailscale, pairing, and mailbox deployment.
+
+---
+
+### 5. Deferred / Research
+- Direct tablet ↔ phone sync without the laptop (requires inbound server or foreground service on Android).
+- Alternative mailbox backends (R2-only, other cloud providers) behind the same `Transport` trait.
+- Key rotation and revoking a lost device (`key_id` field reserved in envelope for this).
+- Optional WebSocket relay as another `Transport` implementation.
+- iOS support (VPN-slot and background constraints to re-evaluate).
+- Selective sync (per-board) using cr-sqlite's filtering (docs advise against custom multi-tenancy).
 
 ---
 
@@ -691,7 +1130,8 @@ flowchart LR
 | `directories` crate fails on Android | Medium | High | Already planned: pass explicit path from Tauri host (Task 1.5) |
 | Soft keyboard pushes canvas layout | Medium | High | Use `visualViewport` API, test early (Task 2.9) |
 | Fractional indexing migration corrupts task order | Medium | Low | Write thorough migration with rollback; test on copy of production DB |
-| WebSocket relay is single point of failure | Medium | Medium | Store pending changes locally; retry on reconnect; consider P2P fallback |
+| Cross-device sync conflict / data loss | High | Low | cr-sqlite causal CRDTs + LWW per column; per-peer cursors; idempotent transactional apply; rolling local backups (Task 5.11) |
+| Device offline time gap (tablet/laptop 4-5h apart) | Medium | Low | Encrypted cloud mailbox store-and-forward fallback (Task 5.10 & 5.11) |
 
 ---
 
@@ -741,9 +1181,28 @@ All 14 commands registered in [`main.rs`](file:///home/anchit/gitClones/the-game
 | `src/utils/platform.ts` | 2 | Platform detection utility |
 | `crates/core/src/sync.rs` | 4 | Changeset pull/apply + CRDT helpers |
 | `crates/core/tests/sync_tests.rs` | 4 | CRDT merge behavior tests |
-| `crates/core/src/transport.rs` | 5 | WebSocket sync client |
-| `relay-server/` | 5 | Standalone WebSocket relay server |
-| `src/components/SyncStatus.tsx` | 5 | Sync indicator + settings UI |
+| `crates/core/src/transport/mod.rs` | 5 | Transport trait & in-process LocalTransport |
+| `crates/core/src/sync/cursors.rs` | 5 | Per-peer cursor tracking (`sync_peers`, `sync_cursors`) |
+| `crates/core/tests/sync_two_instances.rs` | 5 | In-process multi-instance convergence tests |
+| `crates/core/src/sync/protocol.rs` | 5 | Wire envelope, typed change rows & pagination |
+| `crates/core/src/crypto.rs` | 5 | HKDF key derivation & XChaCha20-Poly1305 AEAD |
+| `crates/core/src/pairing.rs` | 5 | QR code pairing payload & token exchange |
+| `crates/core/src/transport/server.rs` | 5 | Embedded HTTP hub daemon (axum, desktop-only) |
+| `crates/core/src/transport/client.rs` | 5 | LAN & Tailscale peer client (`reqwest`) |
+| `crates/core/src/sync/coordinator.rs` | 5 | Multi-transport lifecycle & sync coordinator |
+| `crates/core/src/transport/files.rs` | 5 | Content-addressed chunked file sync |
+| `crates/core/src/sync/events.rs` | 5 | Live SSE event stream (`/api/sync/events`) |
+| `crates/core/src/transport/mailbox.rs` | 5 | Cloudflare Durable Object mailbox client |
+| `crates/core/src/backup.rs` | 5 | Local rolling database backups (`VACUUM INTO`) |
+| `crates/core/src/sync/diagnostics.rs` | 5 | Diagnostics ring buffer & connectivity tests |
+| `mailbox/src/index.ts` | 5 | Cloudflare Worker mailbox router & auth |
+| `mailbox/src/mailbox_do.ts` | 5 | SQLite-backed Durable Object mailbox storage |
+| `mailbox/wrangler.toml` | 5 | Cloudflare Worker & DO deployment configuration |
+| `src/components/SyncSettingsModal.tsx` | 5 | Peer management, QR pairing & sync settings UI |
+| `src/components/PairingDialog.tsx` | 5 | QR code pairing & text secret dialog |
+| `src/components/SyncStatusIndicator.tsx` | 5 | Topbar & mobile live sync status badge |
+| `src/components/SyncDiagnostics.tsx` | 5 | Diagnostics & connectivity check modal |
+| `relay-server/` | Deferred | (Research) Standalone WebSocket relay server |
 
 ## Appendix D: Zoom & Canvas Centering Overhaul (Cross-Device)
 

@@ -16,8 +16,11 @@ import { Canvas } from './components/Canvas';
 import { ContextMenu } from './components/ContextMenu';
 import { SearchModal } from './components/SearchModal';
 import { MobileBottomBar } from './components/MobileBottomBar';
+import { SyncStatusIndicator } from './components/SyncStatusIndicator';
+import { SyncSettingsModal } from './components/SyncSettingsModal';
 import { isPhoneScreen, isTouchPrimary, isTablet, isAndroidTablet, getDeviceCategory } from './utils/platform';
-import { ipcService } from './services/ipc';
+import { ipcService, syncService, resolveBoardId, CANONICAL_ROOT_BOARD_ID } from './services/ipc';
+import { listen } from '@tauri-apps/api/event';
 import { 
   Search as SearchIcon, 
   Undo2, 
@@ -46,6 +49,7 @@ export const App: React.FC = () => {
   const [canvasScale, setCanvasScale] = useState<number>(1.0);
   const [isUnsortedDrawerOpen, setIsUnsortedDrawerOpen] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [isSyncSettingsOpen, setIsSyncSettingsOpen] = useState(false);
   const [selectedTableCells, setSelectedTableCells] = useState<{ tableId: string; cellIndices: number[] } | null>(null);
   const pendingUnsortedBoardsRef = useRef<Set<string>>(new Set());
   
@@ -74,14 +78,33 @@ export const App: React.FC = () => {
   // Active Board Navigation
   const [currentBoardId, setCurrentBoardId] = useState<string>(() => {
     try {
-      return localStorage.getItem('milanote_current_board') || 'root-board';
-    } catch { return 'root-board'; }
+      const stored = localStorage.getItem('milanote_current_board');
+      if (stored && stored !== 'root-board' && stored !== '00000000-0000-0000-0000-000000000001') {
+        return stored;
+      }
+      return CANONICAL_ROOT_BOARD_ID;
+    } catch { return CANONICAL_ROOT_BOARD_ID; }
   });
   const [boardHistory, setBoardHistory] = useState<Array<{ id: string; title: string }>>(() => {
     try {
       const stored = localStorage.getItem('milanote_board_history');
-      return stored ? JSON.parse(stored) : [{ id: 'root-board', title: 'Home' }];
-    } catch { return [{ id: 'root-board', title: 'Home' }]; }
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map((item: any, idx: number) => {
+            let id = item.id;
+            if (id === 'root-board' || id === '00000000-0000-0000-0000-000000000001') {
+              id = CANONICAL_ROOT_BOARD_ID;
+            }
+            if (idx === 0 && (item.title === 'Welcome to Antigravity Board' || !item.title)) {
+              return { ...item, id, title: 'Home' };
+            }
+            return { ...item, id };
+          });
+        }
+      }
+      return [{ id: CANONICAL_ROOT_BOARD_ID, title: 'Home' }];
+    } catch { return [{ id: CANONICAL_ROOT_BOARD_ID, title: 'Home' }]; }
   });
   
   useEffect(() => {
@@ -179,14 +202,174 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  // Canvas Element Loader & Non-blocking Background Sync
   useEffect(() => {
     loadElements(currentBoardId);
+    syncService.triggerSync().catch((e) => console.warn('Background sync note:', e));
     try {
       let savedBg = localStorage.getItem(`milanote_bg_${currentBoardId}`) || 'rgb(35, 35, 35)';
       if (savedBg === '#1f2125') savedBg = 'rgb(35, 35, 35)';
       document.documentElement.style.setProperty('--milanote-canvas-bg', savedBg);
     } catch {}
   }, [currentBoardId, loadElements]);
+
+  const currentBoardIdRef = useRef(currentBoardId);
+  currentBoardIdRef.current = currentBoardId;
+
+  const editingElementIdRef = useRef(editingElementId);
+  editingElementIdRef.current = editingElementId;
+
+  // Phase 5: Reactive UI refresh when background sync merges changes (Task 5.9)
+  const refreshCurrentBoardElements = useCallback(async () => {
+    try {
+      const activeBoardId = currentBoardIdRef.current;
+      const data = await ipcService.getElementsForBoard(activeBoardId);
+      setElements((prev) => {
+        const editingId = editingElementIdRef.current;
+        if (editingId) {
+          const currentlyEditing = prev.find((e) => e.id === editingId);
+          if (currentlyEditing) {
+            return data.map((d) => (d.id === editingId ? currentlyEditing : d));
+          }
+        }
+        return data;
+      });
+      // Also update board title if it was modified remotely
+      try {
+        const allBoards = await ipcService.listBoards(null);
+        const resolvedCurrentId = await resolveBoardId(activeBoardId);
+        const current = allBoards.find((b) => b.id === resolvedCurrentId);
+        if (current) {
+          const displayTitle = (current.title === 'Welcome to Antigravity Board' || !current.title) ? 'Home' : current.title;
+          setBoardHistory((prev) => {
+            if (prev.length === 1 && prev[0].title !== displayTitle) {
+              return [{ id: prev[0].id, title: displayTitle }];
+            }
+            return prev;
+          });
+        }
+      } catch (_) {}
+    } catch (e) {
+      console.error('Failed to refresh elements after sync:', e);
+    }
+  }, []);
+
+  // Initial check to normalize root board title to 'Home' across all platforms
+  useEffect(() => {
+    (async () => {
+      try {
+        const allBoards = await ipcService.listBoards(null);
+        if (allBoards.length > 0) {
+          const rootBoard = allBoards[0];
+          if (rootBoard.title === 'Welcome to Antigravity Board' || !rootBoard.title) {
+            await ipcService.updateBoard(rootBoard.id, 'Home');
+            setBoardHistory((prev) => prev.map((item, i) => i === 0 ? { ...item, title: 'Home' } : item));
+          } else {
+            setBoardHistory((prev) => prev.map((item, i) => i === 0 ? { ...item, title: rootBoard.title || 'Home' } : item));
+          }
+        }
+      } catch (err) {
+        console.error('Failed to normalize root board title:', err);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let coalesceTimer: any = null;
+
+    listen('sync-applied', () => {
+      if (coalesceTimer) clearTimeout(coalesceTimer);
+      coalesceTimer = setTimeout(() => {
+        refreshCurrentBoardElements();
+      }, 30);
+    }).then((unsub) => {
+      unlisten = unsub;
+    });
+
+    return () => {
+      if (unlisten) unlisten();
+      if (coalesceTimer) clearTimeout(coalesceTimer);
+    };
+  }, [refreshCurrentBoardElements]);
+
+  // Phase 5: Continuous background auto-sync (every 2s) + reload on app open/focus/resume
+  useEffect(() => {
+    const triggerSyncCycle = async () => {
+      try {
+        const results = await syncService.triggerSync();
+        let changesCount = 0;
+        if (Array.isArray(results)) {
+          for (const item of results) {
+            const stats = Array.isArray(item) ? item[1] : item;
+            if (stats && typeof stats === 'object') {
+              changesCount += (stats.rows_pulled || 0) + (stats.rows_pushed || 0);
+            }
+          }
+        } else if (results && typeof results === 'object') {
+          for (const res of Object.values(results) as any[]) {
+            const stats = Array.isArray(res) ? res[1] : res;
+            if (stats && typeof stats === 'object') {
+              changesCount += (stats.rows_pulled || 0) + (stats.rows_pushed || 0);
+            }
+          }
+        }
+        if (changesCount > 0) {
+          await refreshCurrentBoardElements();
+        }
+      } catch (_) {}
+    };
+
+    // 1. Immediate sync on app launch / reload
+    triggerSyncCycle();
+
+    // 2. On window focus or app visibility change (e.g. Android app resumed from background)
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        triggerSyncCycle();
+        refreshCurrentBoardElements();
+      }
+    };
+    window.addEventListener('focus', handleVisibility);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    // 3. Periodic continuous sync timer: syncs every 2 seconds
+    const intervalTimer = setInterval(triggerSyncCycle, 2000);
+
+    return () => {
+      window.removeEventListener('focus', handleVisibility);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      clearInterval(intervalTimer);
+    };
+  }, [refreshCurrentBoardElements]);
+
+  // Phase 5: Debounced sync on local write (sub-second sync)
+  const syncDebounceRef = useRef<any>(null);
+  const queueDebouncedSync = useCallback((immediate = false) => {
+    if (syncDebounceRef.current) clearTimeout(syncDebounceRef.current);
+    const doSync = async () => {
+      try {
+        const results = await syncService.triggerSync();
+        let pulled = 0;
+        if (Array.isArray(results)) {
+          for (const item of results) {
+            const stats = Array.isArray(item) ? item[1] : item;
+            if (stats && typeof stats === 'object') {
+              pulled += stats.rows_pulled || 0;
+            }
+          }
+        }
+        if (pulled > 0) {
+          await refreshCurrentBoardElements();
+        }
+      } catch (_) {}
+    };
+    if (immediate) {
+      doSync();
+    } else {
+      syncDebounceRef.current = setTimeout(doSync, 150);
+    }
+  }, [refreshCurrentBoardElements]);
 
   const handleCopy = useCallback((targetId?: string) => {
     const idsToCopy = selectedIds.length > 0 
@@ -253,7 +436,8 @@ export const App: React.FC = () => {
     setSelectedIds(newElements.map((el) => el.id));
     setSelectedElementId(newElements.length === 1 ? newElements[0].id : null);
     setContextMenu(null);
-  }, [clipboardElements, elements, recordHistory, currentBoardId]);
+    queueDebouncedSync(true);
+  }, [clipboardElements, elements, recordHistory, currentBoardId, queueDebouncedSync]);
 
   const handleSelectAll = useCallback(() => {
     const allIds = elements.map((el) => el.id);
@@ -358,17 +542,29 @@ export const App: React.FC = () => {
 
   const [isElementBeingDragged, setIsElementBeingDragged] = useState(false);
 
+  const handleSwitchBoard = useCallback((boardId: string, title?: string, isRoot: boolean = false) => {
+    setCurrentBoardId(boardId);
+    setSelectedElementId(null);
+    setSelectedIds([]);
+    setEditingElementId(null);
+    setIsUnsortedDrawerOpen(false);
+    if (isRoot) {
+      setBoardHistory([{ id: boardId, title: title || 'Home' }]);
+    } else {
+      setBoardHistory((prev) => {
+        if (prev.some(p => p.id === boardId)) {
+          return prev.slice(0, prev.findIndex(p => p.id === boardId) + 1);
+        }
+        return [...prev, { id: boardId, title: title || 'Board' }];
+      });
+    }
+  }, []);
+
   const handleOpenBoard = useCallback((targetBoardId: string, keepSelection: boolean = false) => {
     const el = elements.find((x) => x.id === targetBoardId || x.content?.target_board_id === targetBoardId);
     const realBoardId = el?.content?.target_board_id || targetBoardId;
     const title = el?.content?.title || el?.content?.preview_title || 'Board';
-    setCurrentBoardId(realBoardId);
-    setBoardHistory((prev) => {
-      if (prev.some(p => p.id === realBoardId)) {
-        return prev.slice(0, prev.findIndex(p => p.id === realBoardId) + 1);
-      }
-      return [...prev, { id: realBoardId, title }];
-    });
+    handleSwitchBoard(realBoardId, title, false);
     if (!keepSelection) {
       setSelectedElementId(null);
       setSelectedIds([]);
@@ -380,7 +576,7 @@ export const App: React.FC = () => {
     } else if (!keepSelection) {
       setIsUnsortedDrawerOpen(false);
     }
-  }, [elements]);
+  }, [elements, handleSwitchBoard]);
 
   const handleMoveElementToBoard = useCallback(async (elementId: string, targetBoardId: string, x?: number, y?: number, isFromBreadcrumb?: boolean, isEnterHover?: boolean) => {
     recordHistory(elements);
@@ -523,6 +719,7 @@ export const App: React.FC = () => {
 
     try {
       await ipcService.batchUpdateElementPositions(updates);
+      queueDebouncedSync(true);
     } catch (e) {
       console.error('Failed to batch update positions:', e);
     }
@@ -533,6 +730,7 @@ export const App: React.FC = () => {
     setElements((prev) => prev.map((el) => (el.id === id ? { ...el, content: newContent } : el)));
     try {
       await ipcService.updateElementContent(id, newContent);
+      queueDebouncedSync(false);
     } catch (e) {
       console.error('Failed to update content:', e);
     }
@@ -543,6 +741,7 @@ export const App: React.FC = () => {
     setElements((prev) => prev.map((el) => (el.id === id ? { ...el, style: newStyle } : el)));
     try {
       await ipcService.updateElementStyle(id, newStyle);
+      queueDebouncedSync(true);
     } catch (e) {
       console.error('Failed to update style:', e);
     }
@@ -614,6 +813,7 @@ export const App: React.FC = () => {
     setElements((prev) => [...prev, newEl]);
     setSelectedElementId(newEl.id);
     setSelectedIds([newEl.id]);
+    queueDebouncedSync(true);
   };
 
   const handleDelete = async (idToDelete?: string) => {
@@ -641,6 +841,7 @@ export const App: React.FC = () => {
         console.error('Failed to delete element:', e);
       }
     }
+    queueDebouncedSync(true);
   };
 
   const handleToggleLock = async (targetId?: string) => {
@@ -861,6 +1062,7 @@ export const App: React.FC = () => {
         setEditingElementId(newEl.id);
       }
     }
+    queueDebouncedSync(true);
   };
 
   const handleCreateTaskListFromItem = async (x: number, y: number, item: any, targetColumnId?: string) => {
@@ -886,6 +1088,7 @@ export const App: React.FC = () => {
     setElements((prev) => [...prev, newEl]);
     setSelectedElementId(newEl.id);
     setSelectedIds([newEl.id]);
+    queueDebouncedSync(true);
   };
 
   const handleDropToolAtScreen = (tool: ToolType, clientX: number, clientY: number) => {
@@ -1154,14 +1357,14 @@ export const App: React.FC = () => {
       ) : (
         <>
           {/* FULL-WIDTH TOP HEADER BAR (PRIMARY) */}
-          <header className={`milanote-topbar ${currentBoardId !== 'root-board' ? 'no-border' : ''}`} onClick={(e) => e.stopPropagation()}>
+          <header className={`milanote-topbar ${boardHistory.length > 1 ? 'no-border' : ''}`} onClick={(e) => e.stopPropagation()}>
             <div className="topbar-left">
               <div className={`home-circle-logo ${dragHoverBoardId === 'root-board' ? 'drag-hover-highlight' : ''}`} title="Home" data-board-id="root-board" onClick={() => handleBreadcrumbClick(0)}>
                 <span>M</span>
               </div>
 
               {/* Mobile back navigation button */}
-              {currentBoardId !== 'root-board' && (
+              {boardHistory.length > 1 && (
                 <button
                   className="mobile-topbar-back-btn"
                   onClick={() => handleBreadcrumbClick(Math.max(0, boardHistory.length - 2))}
@@ -1171,53 +1374,61 @@ export const App: React.FC = () => {
                 </button>
               )}
 
-              {/* Mobile compact title */}
-              {currentBoardId !== 'root-board' ? (
-                <input
-                  key={`mobile-title-${currentBoardId}`}
-                  type="text"
-                  className="mobile-board-title"
-                  value={boardHistory[boardHistory.length - 1]?.title || 'Board'}
-                  onChange={(e) => {
-                    const nextTitle = e.target.value;
-                    setBoardHistory((prev) => prev.map((node, i) => i === prev.length - 1 ? { ...node, title: nextTitle } : node));
-                  }}
-                  onBlur={async (e) => {
-                    const nextTitle = e.target.value || 'Untitled Board';
-                    setBoardHistory((prev) => prev.map((node, i) => i === prev.length - 1 ? { ...node, title: nextTitle } : node));
-                    if (currentBoardId !== 'root-board') {
+              {/* Mobile compact title (strictly rendered only on phone screens) */}
+              {isPhoneScreen() && (
+                boardHistory.length > 1 ? (
+                  <input
+                    key={`mobile-title-${currentBoardId}`}
+                    type="text"
+                    className="mobile-board-title"
+                    value={boardHistory[boardHistory.length - 1]?.title || 'Board'}
+                    onChange={(e) => {
+                      const nextTitle = e.target.value;
+                      setBoardHistory((prev) => prev.map((node, i) => i === prev.length - 1 ? { ...node, title: nextTitle } : node));
+                    }}
+                    onBlur={async (e) => {
+                      const nextTitle = e.target.value || 'Untitled Board';
+                      setBoardHistory((prev) => prev.map((node, i) => i === prev.length - 1 ? { ...node, title: nextTitle } : node));
                       try {
-                        await ipcService.updateElementContent(currentBoardId, { title: nextTitle });
+                        await ipcService.updateBoard(currentBoardId, nextTitle);
+                        syncService.triggerSync().catch(() => {});
                       } catch (err) {
                         console.error('Failed to update board title in IPC:', err);
                       }
-                    }
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === 'Escape') {
-                      e.currentTarget.blur();
-                    }
-                  }}
-                  title="Click to edit board title"
-                />
-              ) : (
-                <span className="mobile-board-title">GameNote</span>
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === 'Escape') {
+                        e.currentTarget.blur();
+                      }
+                    }}
+                    title="Click to edit board title"
+                  />
+                ) : (
+                  <span
+                    className="mobile-board-title"
+                    style={{ display: 'inline-flex', alignItems: 'center' }}
+                  >
+                    {boardHistory[0]?.title || 'Home'}
+                  </span>
+                )
               )}
 
-              <nav className="breadcrumb-path">
-                {boardHistory.map((node, i) => (
-                  <React.Fragment key={node.id}>
-                    {i > 0 && <span style={{ color: 'rgba(255,255,255,0.2)', margin: '0 4px' }}>/</span>}
-                    <button
-                      data-board-id={node.id}
-                      className={`breadcrumb-item ${i === boardHistory.length - 1 ? 'active' : ''} ${dragHoverBoardId === node.id ? 'drag-hover-highlight' : ''}`}
-                      onClick={() => handleBreadcrumbClick(i)}
-                    >
-                      {node.title}
-                    </button>
-                  </React.Fragment>
-                ))}
-              </nav>
+              <div className="board-switcher-container">
+                <nav className="breadcrumb-path">
+                  {boardHistory.map((node, i) => (
+                    <React.Fragment key={node.id}>
+                      {i > 0 && <span style={{ color: 'rgba(255,255,255,0.2)', margin: '0 4px' }}>/</span>}
+                      <button
+                        data-board-id={node.id}
+                        className={`breadcrumb-item ${i === boardHistory.length - 1 ? 'active' : ''} ${dragHoverBoardId === node.id ? 'drag-hover-highlight' : ''}`}
+                        onClick={() => handleBreadcrumbClick(i)}
+                      >
+                        {node.title}
+                      </button>
+                    </React.Fragment>
+                  ))}
+                </nav>
+              </div>
             </div>
 
             <div className="topbar-right">
@@ -1249,12 +1460,13 @@ export const App: React.FC = () => {
               <button className="topbar-icon-btn" title="Notifications"><Bell size={17} /></button>
               <button className="topbar-icon-btn" title="Search (Ctrl+K)" onClick={() => setIsSearchOpen(true)}><SearchIcon size={17} /></button>
               <button className="topbar-icon-btn mobile-unsorted-toggle-btn" title="Unsorted items" onClick={() => setIsUnsortedDrawerOpen((prev) => !prev)}><Folder size={17} /></button>
-              <button className="topbar-icon-btn" title="Settings & Profile"><Settings size={17} /></button>
+              <SyncStatusIndicator onOpenSettings={() => setIsSyncSettingsOpen(true)} />
+              <button className="topbar-icon-btn" title="Settings & Profile" onClick={() => setIsSyncSettingsOpen(true)}><Settings size={17} /></button>
             </div>
           </header>
 
-          {/* SECONDARY BOARD TOPBAR (APPEARS ONLY WHEN WE ENTER A BOARD) */}
-          {currentBoardId !== 'root-board' && (
+          {/* SECONDARY BOARD TOPBAR (APPEARS ONLY WHEN WE ENTER A SUB-BOARD) */}
+          {boardHistory.length > 1 && (
             <header className="milanote-secondary-topbar" onClick={(e) => e.stopPropagation()}>
               <div className="secondary-topbar-left">
                 <span className="topbar-saved-status">Saved</span>
@@ -1273,12 +1485,11 @@ export const App: React.FC = () => {
                   onBlur={async (e) => {
                     const nextTitle = e.target.value || 'Untitled Board';
                     setBoardHistory((prev) => prev.map((node, i) => i === prev.length - 1 ? { ...node, title: nextTitle } : node));
-                    if (currentBoardId !== 'root-board') {
-                      try {
-                        await ipcService.updateElementContent(currentBoardId, { title: nextTitle });
-                      } catch (err) {
-                        console.error('Failed to update board title in IPC:', err);
-                      }
+                    try {
+                      await ipcService.updateBoard(currentBoardId, nextTitle);
+                      syncService.triggerSync().catch(() => {});
+                    } catch (err) {
+                      console.error('Failed to update board title in IPC:', err);
                     }
                   }}
                   onKeyDown={(e) => {
@@ -1727,7 +1938,7 @@ export const App: React.FC = () => {
         isOpen={isSearchOpen}
         onClose={() => setIsSearchOpen(false)}
         onSelectResult={(boardId, elementId) => {
-          handleOpenBoard(boardId);
+          handleSwitchBoard(boardId, undefined, false);
           if (elementId) {
             setTimeout(() => {
               setSelectedElementId(elementId);
@@ -1738,7 +1949,7 @@ export const App: React.FC = () => {
       />
 
       {/* NATIVE MILANOTE MOBILE BOARD TOP BAR (IMAGE 2) */}
-      {currentBoardId !== 'root-board' && (
+      {boardHistory.length > 1 && (
         <header className="mobile-board-topbar" onClick={(e) => e.stopPropagation()}>
           <button
             className="mobile-board-back-icon-btn"
@@ -1760,12 +1971,11 @@ export const App: React.FC = () => {
               onBlur={async (e) => {
                 const nextTitle = e.target.value || 'Untitled Board';
                 setBoardHistory((prev) => prev.map((node, i) => i === prev.length - 1 ? { ...node, title: nextTitle } : node));
-                if (currentBoardId !== 'root-board') {
-                  try {
-                    await ipcService.updateElementContent(currentBoardId, { title: nextTitle });
-                  } catch (err) {
-                    console.error('Failed to update board title in IPC:', err);
-                  }
+                try {
+                  await ipcService.updateBoard(currentBoardId, nextTitle);
+                  syncService.triggerSync().catch(() => {});
+                } catch (err) {
+                  console.error('Failed to update board title in IPC:', err);
                 }
               }}
               onKeyDown={(e) => {
@@ -1777,6 +1987,7 @@ export const App: React.FC = () => {
             />
           </div>
 
+          <SyncStatusIndicator dropdownAlign="right" onOpenSettings={() => setIsSyncSettingsOpen(true)} />
           <button
             className="mobile-board-share-btn"
             title="Share board"
@@ -1799,12 +2010,12 @@ export const App: React.FC = () => {
       {/* Native Milanote Mobile Bottom Bar (Screens 1, 2, 3, 4, 5) */}
       <MobileBottomBar
         currentBoardId={currentBoardId}
+        isRootBoard={boardHistory.length === 1}
         boardTitle={boardHistory[boardHistory.length - 1]?.title || 'Board'}
         unsortedCount={elements.filter(el => Boolean(el.style?.is_unsorted) && el.element_type !== 'line').length}
         onOpenUnsorted={() => setIsUnsortedDrawerOpen(prev => !prev)}
         onOpenBoardsMenu={() => {
           setIsUnsortedDrawerOpen(false);
-          handleBreadcrumbClick(0);
         }}
         canUndo={undoStack.length > 0}
         canRedo={redoStack.length > 0}
@@ -1855,6 +2066,7 @@ export const App: React.FC = () => {
         selectedTableCells={selectedTableCells}
         onDeselectTableCells={() => setSelectedTableCells(null)}
         onUploadImageForElement={handleUploadImageForElement}
+        onOpenSyncSettings={() => setIsSyncSettingsOpen(true)}
       />
 
       {/* Two-Finger Tap Context Menu Sheet (Phone only) */}
@@ -1897,6 +2109,13 @@ export const App: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Sync Settings & Pairing Modal (Phase 5) */}
+      <SyncSettingsModal
+        isOpen={isSyncSettingsOpen}
+        onClose={() => setIsSyncSettingsOpen(false)}
+        onSyncApplied={refreshCurrentBoardElements}
+      />
     </div>
   );
 };

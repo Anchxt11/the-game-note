@@ -1,12 +1,14 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { Calendar, Trash2, Menu } from 'lucide-react';
+import { generateKeyBetween } from 'fractional-indexing';
 import { Element } from '../types';
 
-interface TaskItem {
+export interface TaskItem {
   id: string;
   text: string;
   is_checked: boolean;
+  order_index?: string;
 }
 
 interface TaskListCardProps {
@@ -182,9 +184,18 @@ export const TaskListCard: React.FC<TaskListCardProps> = ({
       }
     } else if (targetDropIndex !== null) {
       const nonDragged = items.filter((x) => x.id !== itemId);
+      const prevKey = targetDropIndex > 0 ? (nonDragged[targetDropIndex - 1]?.order_index || null) : null;
+      const nextKey = targetDropIndex < nonDragged.length ? (nonDragged[targetDropIndex]?.order_index || null) : null;
+      let newOrderIndex: string;
+      try {
+        newOrderIndex = generateKeyBetween(prevKey, nextKey);
+      } catch {
+        newOrderIndex = 'a0';
+      }
+      const updatedDragged = { ...draggedItem, order_index: newOrderIndex };
       const newItems = [
         ...nonDragged.slice(0, targetDropIndex),
-        draggedItem,
+        updatedDragged,
         ...nonDragged.slice(targetDropIndex),
       ];
       onContentChange(el.id, { ...el.content, items: newItems });
@@ -323,7 +334,14 @@ export const TaskListCard: React.FC<TaskListCardProps> = ({
                   if (e.key === 'Enter') {
                     e.preventDefault();
                     const nextId = Date.now().toString();
-                    const newItems = [...items, { id: nextId, text: '', is_checked: false }];
+                    const lastKey = items.length > 0 ? (items[items.length - 1]?.order_index || null) : null;
+                    let newKey: string;
+                    try {
+                      newKey = generateKeyBetween(lastKey, null);
+                    } catch {
+                      newKey = 'a0';
+                    }
+                    const newItems = [...items, { id: nextId, text: '', is_checked: false, order_index: newKey }];
                     onContentChange(el.id, { ...el.content, items: newItems });
                   } else if (e.key === 'Backspace' && item.text === '' && items.length > 0) {
                     e.preventDefault();

@@ -39,8 +39,10 @@ import {
   Outdent,
   AlignCenter,
   Code,
-  Upload
+  Upload,
+  RefreshCw
 } from 'lucide-react';
+import { SyncStatusIndicator } from './SyncStatusIndicator';
 
 interface MobileBottomBarProps {
   currentBoardId: string;
@@ -84,6 +86,8 @@ interface MobileBottomBarProps {
   selectedTableCells?: { tableId: string; cellIndices: number[] } | null;
   onDeselectTableCells?: () => void;
   onUploadImageForElement?: (elementId: string, dataUrl: string) => void;
+  onOpenSyncSettings?: () => void;
+  isRootBoard?: boolean;
 }
 
 const CLASSIC_COLORS = [
@@ -146,7 +150,10 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
   selectedTableCells,
   onDeselectTableCells,
   onUploadImageForElement,
+  onOpenSyncSettings,
+  isRootBoard,
 }) => {
+  const isRoot = isRootBoard ?? (currentBoardId === 'root-board');
   // Navigation mode: 'default' | 'system' | 'tools'
   const [activeMenu, setActiveMenu] = useState<'default' | 'system' | 'tools'>('default');
   const [showMoreContextMenu, setShowMoreContextMenu] = useState(false);
@@ -731,10 +738,17 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
         }}
       />
 
+      {/* TOP-LEFT FLOATING SYNC STATUS PILL (ON ROOT BOARD & CANVAS) */}
+      {!isTyping && isRoot && (
+        <div className="mobile-sync-floating-pill">
+          <SyncStatusIndicator dropdownAlign="left" onOpenSettings={onOpenSyncSettings || (() => {})} />
+        </div>
+      )}
+
       {/* TOP-RIGHT FLOATING UNSORTED PILL (IMAGE 2) */}
       {!isTyping && (
         <button
-          className={`mobile-unsorted-floating-pill ${currentBoardId !== 'root-board' ? 'under-topbar' : ''}`}
+          className={`mobile-unsorted-floating-pill ${!isRoot ? 'under-topbar' : ''}`}
           onClick={onOpenUnsorted}
           title="Open Unsorted drawer"
         >
@@ -1986,6 +2000,18 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
 
               <button
                 className="mobile-system-btn"
+                onClick={() => {
+                  onOpenSyncSettings?.();
+                  setActiveMenu('default');
+                }}
+                title="Sync & Pairing"
+              >
+                <RefreshCw size={21} />
+                <span>Sync</span>
+              </button>
+
+              <button
+                className="mobile-system-btn"
                 onClick={() => {}}
                 title="Activity"
               >
@@ -1995,8 +2021,11 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
 
               <button
                 className="mobile-system-btn"
-                onClick={() => {}}
-                title="Settings"
+                onClick={() => {
+                  onOpenSyncSettings?.();
+                  setActiveMenu('default');
+                }}
+                title="Settings & Workspace"
               >
                 <Settings size={21} />
                 <span>Settings</span>

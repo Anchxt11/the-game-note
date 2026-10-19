@@ -175,7 +175,7 @@ fn test_board_duplication() {
         element_id: task_elem.id,
         text: "Task 1".to_string(),
         is_checked: true,
-        order_index: 0,
+        order_index: "a0".to_string(),
     };
     db.add_task_item(&task_item).unwrap();
 

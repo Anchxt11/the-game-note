@@ -32,6 +32,11 @@ Linux
 	Smooth animated movement. DONE
 	GRID FIX -- NP
 	ANTIALIASING -- NP
+
+	Text Editing not registering
+	Taskbox element not functioning properly in both android and linux
+	Zoom still needs to fixed -- there is variable canvas width smh that makes the zooming in and out jittery and not smooht like the elements are moving someplace else then snapping back
+
 	
 Common
 	text formatting skipping to the front DONE
@@ -44,3 +49,6 @@ Common
 	Object resizing not available in both	DONE
 	Image uploading in both DONE
 	NO CANVAS BOUNDING and All content should stay in screen when zoomed out DONE
+
+
+

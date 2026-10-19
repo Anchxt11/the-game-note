@@ -1,0 +1,16 @@
+{
+  "name": "gamenote-mailbox",
+  "version": "1.0.0",
+  "description": "Zero-knowledge encrypted cloud mailbox relay for The Game Note",
+  "main": "src/index.ts",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241018.0",
+    "typescript": "^5.5.0",
+    "wrangler": "^3.80.0"
+  }
+}
