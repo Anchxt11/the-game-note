@@ -2,6 +2,7 @@ use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
 use rand::RngCore;
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -10,6 +11,8 @@ use crate::error::{AppError, Result};
 
 pub const XCHACHA20_NONCE_SIZE: usize = 24;
 pub const KEY_SIZE: usize = 32;
+
+type HmacSha256 = Hmac<Sha256>;
 
 /// Cryptographic keys derived from the master sync secret via HKDF-SHA256.
 /// All sensitive key material is automatically zeroized from memory when dropped.
@@ -84,6 +87,20 @@ pub fn compute_aad(protocol_version: u32, sender_site_id: &str, kind: &str, key_
     aad.extend_from_slice(kind.as_bytes());
     aad.extend_from_slice(&key_id.to_be_bytes());
     aad
+}
+
+/// Computes a content-addressed 64-hex file ID using HMAC-SHA256 keyed with `file_key`.
+/// Keying the hash ensures that third parties / cloud relays cannot confirm known files.
+pub fn compute_file_id(file_key: &[u8; KEY_SIZE], bytes: &[u8]) -> String {
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(file_key).expect("HMAC can take key of any size");
+    mac.update(bytes);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Verifies whether the provided bytes match the expected keyed file ID.
+pub fn verify_file_id(file_key: &[u8; KEY_SIZE], bytes: &[u8], expected_id: &str) -> bool {
+    let actual = compute_file_id(file_key, bytes);
+    verify_token_constant_time(&actual, expected_id)
 }
 
 /// Encrypts plaintext using XChaCha20-Poly1305 AEAD with a fresh random 24-byte nonce.
@@ -237,5 +254,25 @@ mod tests {
         assert!(verify_token_constant_time(expected, valid));
         assert!(!verify_token_constant_time(expected, invalid));
         assert!(!verify_token_constant_time(expected, short));
+    }
+
+    #[test]
+    fn test_compute_and_verify_file_id() {
+        let secret = [15u8; 32];
+        let keys = SyncKeys::derive_from_secret(&secret);
+        let sample_bytes = b"PNG image binary contents here...";
+
+        let file_id = compute_file_id(&keys.file_key, sample_bytes);
+        assert_eq!(file_id.len(), 64);
+        assert!(file_id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+
+        // Verification matches
+        assert!(verify_file_id(&keys.file_key, sample_bytes, &file_id));
+
+        // Different data or corrupted file ID fails verification
+        assert!(!verify_file_id(&keys.file_key, b"different bytes", &file_id));
+        let mut tampered = file_id.clone();
+        tampered.replace_range(0..1, if &file_id[0..1] == "a" { "b" } else { "a" });
+        assert!(!verify_file_id(&keys.file_key, sample_bytes, &tampered));
     }
 }

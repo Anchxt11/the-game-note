@@ -20,9 +20,11 @@ import {
   Edit2,
   Check,
   ArrowRight,
+  RotateCcw,
 } from 'lucide-react';
-import { syncService, SyncConfig, PeerConfig, SyncStatus } from '../services/ipc';
+import { syncService, ipcService, SyncConfig, PeerConfig, SyncStatus, BackupInfo } from '../services/ipc';
 import { PairingDialog } from './PairingDialog';
+import { isPhoneScreen, isTouchPrimary } from '../utils/platform';
 
 interface SyncSettingsModalProps {
   isOpen: boolean;
@@ -37,6 +39,13 @@ export const SyncSettingsModal: React.FC<SyncSettingsModalProps> = ({ isOpen, on
   const [isSyncing, setIsSyncing] = useState(false);
   const [isPairingOpen, setIsPairingOpen] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // Database Backups
+  const [backups, setBackups] = useState<BackupInfo[]>([]);
+  const [loadingBackups, setLoadingBackups] = useState(false);
+  const [creatingBackup, setCreatingBackup] = useState(false);
+  const [restoringFilename, setRestoringFilename] = useState<string | null>(null);
+  const [backupNotice, setBackupNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Device name edit
   const [isEditingName, setIsEditingName] = useState(false);
@@ -54,7 +63,7 @@ export const SyncSettingsModal: React.FC<SyncSettingsModalProps> = ({ isOpen, on
   const [newPeerName, setNewPeerName] = useState('');
   const [newPeerSiteId, setNewPeerSiteId] = useState('');
   const [newPeerUrl, setNewPeerUrl] = useState('');
-  const [newPeerKind, setNewPeerKind] = useState<'lan' | 'tailscale'>('lan');
+  const [newPeerKind, setNewPeerKind] = useState<'lan'>('lan');
   const [testingEndpoint, setTestingEndpoint] = useState<string | null>(null);
   const [peerTestResult, setPeerTestResult] = useState<{ url: string; success: boolean; message: string } | null>(null);
 
@@ -62,11 +71,11 @@ export const SyncSettingsModal: React.FC<SyncSettingsModalProps> = ({ isOpen, on
   const [syncLog, setSyncLog] = useState<string | null>(null);
   const [copiedLog, setCopiedLog] = useState(false);
 
-  // Responsive mobile detection
-  const [isMobile, setIsMobile] = useState(window.innerWidth <= 640);
+  // Responsive mobile/Android detection
+  const [isMobile, setIsMobile] = useState(() => window.innerWidth <= 640 || isPhoneScreen());
 
   useEffect(() => {
-    const handleResize = () => setIsMobile(window.innerWidth <= 640);
+    const handleResize = () => setIsMobile(window.innerWidth <= 640 || isPhoneScreen());
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
@@ -98,10 +107,60 @@ export const SyncSettingsModal: React.FC<SyncSettingsModalProps> = ({ isOpen, on
       if (c?.mailbox?.enabled && c?.mailbox?.url) {
         checkMailboxConnection(c.mailbox.url);
       }
+
+      await loadBackups();
     } catch (e) {
       console.error('Failed to load sync data:', e);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const loadBackups = async () => {
+    try {
+      setLoadingBackups(true);
+      const list = await ipcService.listBackups();
+      setBackups(list);
+    } catch (e) {
+      console.warn('Failed to list backups:', e);
+    } finally {
+      setLoadingBackups(false);
+    }
+  };
+
+  const handleCreateBackup = async () => {
+    try {
+      setCreatingBackup(true);
+      setBackupNotice(null);
+      const b = await ipcService.createBackup('manual');
+      await loadBackups();
+      setBackupNotice({ type: 'success', message: `Created backup snapshot: ${b.filename}` });
+      setTimeout(() => setBackupNotice(null), 4000);
+    } catch (e: any) {
+      setBackupNotice({ type: 'error', message: `Backup failed: ${e?.message || e}` });
+    } finally {
+      setCreatingBackup(false);
+    }
+  };
+
+  const handleRestoreBackup = async (filename: string) => {
+    const ok = window.confirm(
+      `Restoring from "${filename}" will overwrite your current active database with this snapshot.\n\nA safety backup (.bak) of your current database will be saved automatically first.\n\nDo you want to proceed?`
+    );
+    if (!ok) return;
+
+    try {
+      setRestoringFilename(filename);
+      setBackupNotice(null);
+      await ipcService.restoreBackup(filename);
+      setBackupNotice({ type: 'success', message: 'Restored successfully! Safety backup preserved.' });
+      await loadBackups();
+      onSyncApplied?.();
+      setTimeout(() => setBackupNotice(null), 5000);
+    } catch (e: any) {
+      setBackupNotice({ type: 'error', message: `Restore failed: ${e?.message || e}` });
+    } finally {
+      setRestoringFilename(null);
     }
   };
 
@@ -287,7 +346,7 @@ export const SyncSettingsModal: React.FC<SyncSettingsModalProps> = ({ isOpen, on
         {/* Modal Scrollable Content */}
         <div
           style={{
-            padding: isMobile ? '16px' : '20px 24px',
+            padding: isMobile ? '16px 16px max(36px, env(safe-area-inset-bottom)) 16px' : '20px 24px',
             overflowY: 'auto',
             display: 'flex',
             flexDirection: 'column',
@@ -776,7 +835,157 @@ export const SyncSettingsModal: React.FC<SyncSettingsModalProps> = ({ isOpen, on
                 />
               </div>
 
-              {/* 5. Collapsible Advanced Network Settings (For Power Users) */}
+              {/* 5. Local Database Backups & Safety Snapshots */}
+              <div
+                style={{
+                  background: 'rgba(255, 255, 255, 0.03)',
+                  border: '1px solid rgba(255, 255, 255, 0.08)',
+                  borderRadius: '12px',
+                  padding: '16px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '12px',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div
+                      style={{
+                        width: '32px',
+                        height: '32px',
+                        borderRadius: '8px',
+                        background: 'rgba(56, 189, 248, 0.12)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: '#38bdf8',
+                      }}
+                    >
+                      <ShieldCheck size={18} />
+                    </div>
+                    <div>
+                      <div style={{ fontSize: '13.5px', fontWeight: 600, color: '#f8fafc' }}>
+                        Local Database Backups
+                      </div>
+                      <div style={{ fontSize: '11px', color: '#94a3b8', marginTop: '1px' }}>
+                        Atomic SQLite snapshots (VACUUM INTO) stored locally on this device
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={handleCreateBackup}
+                    disabled={creatingBackup}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      background: 'rgba(56, 189, 248, 0.15)',
+                      border: '1px solid rgba(56, 189, 248, 0.3)',
+                      borderRadius: '8px',
+                      padding: isMobile ? '8px 14px' : '6px 12px',
+                      minHeight: isMobile ? '40px' : '32px',
+                      color: '#38bdf8',
+                      fontSize: '12px',
+                      fontWeight: 500,
+                      cursor: creatingBackup ? 'not-allowed' : 'pointer',
+                      touchAction: 'manipulation',
+                      userSelect: 'none',
+                    }}
+                  >
+                    <Plus size={14} />
+                    <span>{creatingBackup ? 'Creating Snapshot...' : 'Backup Now'}</span>
+                  </button>
+                </div>
+
+                {backupNotice && (
+                  <div
+                    style={{
+                      padding: '8px 12px',
+                      borderRadius: '6px',
+                      fontSize: '11.5px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      background: backupNotice.type === 'success' ? 'rgba(74, 222, 128, 0.12)' : 'rgba(239, 68, 68, 0.12)',
+                      border: backupNotice.type === 'success' ? '1px solid rgba(74, 222, 128, 0.3)' : '1px solid rgba(239, 68, 68, 0.3)',
+                      color: backupNotice.type === 'success' ? '#4ade80' : '#f87171',
+                    }}
+                  >
+                    {backupNotice.type === 'success' ? <CheckCircle size={14} /> : <AlertTriangle size={14} />}
+                    <span>{backupNotice.message}</span>
+                  </div>
+                )}
+
+                {/* Backups List */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  {loadingBackups ? (
+                    <div style={{ padding: '12px', textAlign: 'center', color: '#64748b', fontSize: '12px' }}>
+                      Loading snapshots...
+                    </div>
+                  ) : backups.length === 0 ? (
+                    <div style={{ padding: '12px', textAlign: 'center', color: '#64748b', fontSize: '12px', background: 'rgba(0, 0, 0, 0.15)', borderRadius: '8px' }}>
+                      No manual snapshots yet. Click &quot;Backup Now&quot; to create a hot point-in-time snapshot.
+                    </div>
+                  ) : (
+                    backups.slice(0, 6).map((b) => (
+                      <div
+                        key={b.filename}
+                        style={{
+                          background: 'rgba(0, 0, 0, 0.2)',
+                          border: '1px solid rgba(255, 255, 255, 0.05)',
+                          borderRadius: '8px',
+                          padding: isMobile ? '10px 12px' : '8px 12px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'space-between',
+                          gap: '10px',
+                        }}
+                      >
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <div style={{ fontSize: '12px', fontWeight: 500, color: '#e2e8f0', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {b.filename}
+                          </div>
+                          <div style={{ fontSize: '10.5px', color: '#94a3b8', display: 'flex', gap: '8px', marginTop: '2px', flexWrap: 'wrap' }}>
+                            <span>{new Date(b.created_at * 1000).toLocaleString()}</span>
+                            <span>•</span>
+                            <span>{Math.round(b.size_bytes / 1024)} KB</span>
+                            <span>•</span>
+                            <span style={{ textTransform: 'capitalize', color: '#38bdf8' }}>{b.label}</span>
+                          </div>
+                        </div>
+
+                        <button
+                          onClick={() => handleRestoreBackup(b.filename)}
+                          disabled={restoringFilename === b.filename}
+                          style={{
+                            background: 'rgba(239, 68, 68, 0.12)',
+                            border: '1px solid rgba(239, 68, 68, 0.25)',
+                            borderRadius: '6px',
+                            padding: isMobile ? '8px 14px' : '4px 10px',
+                            minHeight: isMobile ? '38px' : '28px',
+                            color: '#f87171',
+                            fontSize: isMobile ? '12px' : '11px',
+                            fontWeight: 500,
+                            cursor: restoringFilename === b.filename ? 'not-allowed' : 'pointer',
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            flexShrink: 0,
+                            touchAction: 'manipulation',
+                            userSelect: 'none',
+                          }}
+                        >
+                          <RotateCcw size={12} className={restoringFilename === b.filename ? 'spin-sync-icon' : ''} />
+                          <span>{restoringFilename === b.filename ? 'Restoring...' : 'Restore'}</span>
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* 6. Collapsible Advanced Network Settings (For Power Users) */}
               <div
                 style={{
                   border: '1px solid rgba(255, 255, 255, 0.08)',
@@ -927,7 +1136,7 @@ export const SyncSettingsModal: React.FC<SyncSettingsModalProps> = ({ isOpen, on
                     {/* Add Peer Manually */}
                     <div>
                       <label style={{ display: 'block', fontSize: '12px', color: '#cbd5e1', marginBottom: '6px' }}>
-                        Add Peer Manually (Direct IP / Tailscale)
+                        Add Peer Manually (Direct LAN IP)
                       </label>
                       <div style={{ display: 'flex', gap: '6px', flexWrap: isMobile ? 'wrap' : 'nowrap' }}>
                         <input

@@ -117,10 +117,48 @@ export const ipcService = {
   search: async (query: string) => {
     return await searchBoards(query);
   },
+
+  storeImageFile: async (base64Data: string): Promise<StoredImageInfo> => {
+    return await invoke<StoredImageInfo>('store_image_file', { base64Data });
+  },
+
+  getImageFile: async (fileId: string): Promise<string> => {
+    return await invoke<string>('get_image_file', { fileId });
+  },
+
+  createBackup: async (label?: string): Promise<BackupInfo> => {
+    return await invoke<BackupInfo>('create_backup', { label: label || null });
+  },
+
+  listBackups: async (): Promise<BackupInfo[]> => {
+    return await invoke<BackupInfo[]>('list_backups');
+  },
+
+  restoreBackup: async (filename: string): Promise<string> => {
+    return await invoke<string>('restore_backup', { filename });
+  },
+
+  exportBackup: async (targetPath: string): Promise<void> => {
+    await invoke('export_backup', { targetPath });
+  },
 };
 
+export interface StoredImageInfo {
+  file_id: string;
+  mime_type: string;
+  size_bytes: number;
+}
+
+export interface BackupInfo {
+  filename: string;
+  path: string;
+  created_at: number;
+  size_bytes: number;
+  label: string;
+}
+
 export interface EndpointConfig {
-  kind: 'lan' | 'tailscale' | 'mailbox' | 'local';
+  kind: 'lan' | 'mailbox' | 'local';
   url: string;
 }
 
@@ -160,7 +198,7 @@ export interface PeerSyncStatus {
   name: string;
   last_synced_at: number | null;
   last_error: string | null;
-  active_transport: 'lan' | 'tailscale' | 'mailbox' | 'local' | null;
+  active_transport: 'lan' | 'mailbox' | 'local' | null;
   consecutive_failures: number;
   pull_cursor: number;
   push_cursor: number;
@@ -168,7 +206,7 @@ export interface PeerSyncStatus {
 
 export interface SyncStatus {
   state: 'idle' | 'syncing' | 'paused' | 'error';
-  active_transport: 'lan' | 'tailscale' | 'mailbox' | 'local' | null;
+  active_transport: 'lan' | 'mailbox' | 'local' | null;
   last_synced_at: number | null;
   pending_local_changes: number;
   last_error: string | null;

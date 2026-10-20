@@ -72,13 +72,24 @@ pub fn run() {
                 None
             };
 
-            let coordinator = Arc::new(SyncCoordinator::with_mailbox(
+            let coordinator = Arc::new(SyncCoordinator::with_options(
                 db_arc.clone(),
                 sync_config.peers.clone(),
                 sync_keys.clone(),
                 auth_token.clone(),
                 mailbox_url,
+                Some(storage_arc.clone()),
             ));
+
+            // Automated rolling daily backup on startup (Task 5.11)
+            let backup_dir = app_data_dir.join("backups");
+            let _ = milanote_core::BackupManager::create_backup(&db.conn(), &backup_dir, "daily");
+            let _ = milanote_core::BackupManager::rotate_backups(&backup_dir, 7, 1);
+
+            // Automated content-addressed migration of legacy/embedded images (Task 5.7)
+            if let Some(ref keys) = sync_keys {
+                let _ = milanote_core::migrate_embedded_images(&db.conn(), &storage, &keys.file_key);
+            }
 
             let mut server_handle = None;
 
@@ -364,6 +375,13 @@ pub fn run() {
             commands::update_board,
             commands::sync_forget_peer,
             commands::sync_clear_inactive_peers,
+            // Phase 5 Image and Backup Commands (Task 5.7 & Task 5.11)
+            commands::store_image_file,
+            commands::get_image_file,
+            commands::create_backup,
+            commands::list_backups,
+            commands::restore_backup,
+            commands::export_backup,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

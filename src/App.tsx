@@ -20,6 +20,7 @@ import { SyncStatusIndicator } from './components/SyncStatusIndicator';
 import { SyncSettingsModal } from './components/SyncSettingsModal';
 import { isPhoneScreen, isTouchPrimary, isTablet, isAndroidTablet, getDeviceCategory } from './utils/platform';
 import { ipcService, syncService, resolveBoardId, CANONICAL_ROOT_BOARD_ID } from './services/ipc';
+import { imageCache } from './services/imageCache';
 import { listen } from '@tauri-apps/api/event';
 import { 
   Search as SearchIcon, 
@@ -1224,15 +1225,29 @@ export const App: React.FC = () => {
     return newId;
   };
 
-  const handleUploadImageForElement = useCallback((elementId: string, dataUrl: string) => {
+  const handleUploadImageForElement = useCallback(async (elementId: string, dataUrl: string) => {
     recordHistory(elements);
     const img = new Image();
-    img.onload = () => {
+    img.onload = async () => {
       const aspect = (img.naturalWidth && img.naturalHeight) ? (img.naturalWidth / img.naturalHeight) : (340 / 220);
       const currentEl = elements.find(x => x.id === elementId);
       const cardW = currentEl?.width || 340;
       const cardH = Math.max(80, Math.round(cardW / aspect));
-      handleContentChange(elementId, { ...(currentEl?.content || {}), url: dataUrl });
+
+      try {
+        const stored = await ipcService.storeImageFile(dataUrl);
+        imageCache.set(stored.file_id, dataUrl);
+        handleContentChange(elementId, {
+          ...(currentEl?.content || {}),
+          file_id: stored.file_id,
+          mime_type: stored.mime_type,
+          url: '',
+        });
+      } catch (err) {
+        console.error('Failed to store content-addressed image:', err);
+        handleContentChange(elementId, { ...(currentEl?.content || {}), url: dataUrl });
+      }
+
       handleUpdateElementPositions([{ id: elementId, x: currentEl?.x || 100, y: currentEl?.y || 100, width: cardW, height: cardH, z_index: currentEl?.z_index || 10 }]);
     };
     img.src = dataUrl;
@@ -1240,6 +1255,22 @@ export const App: React.FC = () => {
 
   const handleAddImageFromDrawer = async (url: string, caption: string = '') => {
     recordHistory(elements);
+    let fileId: string | undefined = undefined;
+    let mimeType: string | undefined = undefined;
+    let cleanUrl = url;
+
+    if (url.startsWith('data:image/')) {
+      try {
+        const stored = await ipcService.storeImageFile(url);
+        fileId = stored.file_id;
+        mimeType = stored.mime_type;
+        cleanUrl = '';
+        imageCache.set(stored.file_id, url);
+      } catch (e) {
+        console.error('Failed to store drawer image attachment:', e);
+      }
+    }
+
     const newEl = await ipcService.createElement({
       board_id: currentBoardId,
       element_type: 'image',
@@ -1248,7 +1279,7 @@ export const App: React.FC = () => {
       width: 340,
       height: 220,
       z_index: elements.length + 10,
-      content: { url, caption },
+      content: { url: cleanUrl, file_id: fileId, mime_type: mimeType, caption },
       style: { color_tint: 'charcoal', parent_column_id: null },
     });
     setElements((prev) => [...prev, newEl]);
