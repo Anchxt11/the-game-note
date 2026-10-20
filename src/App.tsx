@@ -47,6 +47,7 @@ export const App: React.FC = () => {
   const [editingElementId, setEditingElementId] = useState<string | null>(null);
   const [renamingLinkId, setRenamingLinkId] = useState<string | null>(null);
   const [canvasScale, setCanvasScale] = useState<number>(1.0);
+  const [minCanvasScale, setMinCanvasScale] = useState<number>(0.40);
   const [isUnsortedDrawerOpen, setIsUnsortedDrawerOpen] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [isSyncSettingsOpen, setIsSyncSettingsOpen] = useState(false);
@@ -144,6 +145,7 @@ export const App: React.FC = () => {
     setResetMobileBarTrigger((prev) => prev + 1);
     setTwoFingerMenu(null);
     setIsUnsortedDrawerOpen(false);
+    setEditingElementId(null);
   }, []);
 
   const recordHistory = useCallback((currentState: Element[]) => {
@@ -776,10 +778,13 @@ export const App: React.FC = () => {
 
     const fitScaleX = availW / Math.max(contentW, 100);
     const fitScaleY = availH / Math.max(contentH, 100);
-    const targetScale = Math.min(1.0, Math.max(0.15, Number(Math.min(fitScaleX, fitScaleY).toFixed(2))));
+    const calculatedFit = Math.min(fitScaleX, fitScaleY);
+    const targetScale = calculatedFit < 0.40
+      ? Math.max(0.05, Number(calculatedFit.toFixed(2)))
+      : Math.min(1.0, Math.max(minCanvasScale, Number(calculatedFit.toFixed(2))));
 
     setCanvasScale(targetScale);
-  }, [elements]);
+  }, [elements, minCanvasScale]);
 
   const handleRecolor = async (tintOrColor: CardColorTint | string, targetId?: string) => {
     const el = contextMenu?.element || elements.find(item => item.id === (targetId || selectedElementId)) || null;
@@ -1514,7 +1519,7 @@ export const App: React.FC = () => {
                     className="secondary-topbar-btn dropdown-btn" 
                     onClick={(e) => { e.stopPropagation(); setShowViewMenu(!showViewMenu); }}
                   >
-                    View <ChevronDown size={14} />
+                    {Math.round(canvasScale * 100)}% <ChevronDown size={14} />
                   </button>
                 </div>
               </div>
@@ -1827,6 +1832,7 @@ export const App: React.FC = () => {
           onDragChange={setIsElementBeingDragged}
           scale={canvasScale}
           onSetScale={setCanvasScale}
+          onMinScaleChange={setMinCanvasScale}
           onCanvasClick={handleCanvasClick}
           onTwoFingerTap={(cx, cy, clientX, clientY, targetEl) => {
             if (getDeviceCategory() === 'phone') {
@@ -1878,9 +1884,9 @@ export const App: React.FC = () => {
             <p className="view-popover-sub">Tip: hold ctrl and use mouse wheel to zoom</p>
             
             <div className="zoom-slider-row">
-              <button className="zoom-popover-icon-btn" onClick={() => setCanvasScale(s => Math.max(0.15, Number((s - 0.15).toFixed(2))))} title="Zoom Out">–</button>
+              <button className="zoom-popover-icon-btn" onClick={() => setCanvasScale(s => Math.max(minCanvasScale, Number((s - 0.15).toFixed(2))))} title="Zoom Out">–</button>
               <div className="zoom-slider-track">
-                <div className="zoom-slider-fill" style={{ width: `${Math.min(100, Math.max(0, ((canvasScale - 0.15) / (3 - 0.15)) * 100))}%` }} />
+                <div className="zoom-slider-fill" style={{ width: `${Math.min(100, Math.max(0, ((canvasScale - minCanvasScale) / (3.0 - minCanvasScale)) * 100))}%` }} />
               </div>
               <span className="zoom-percentage-badge" onClick={() => setCanvasScale(1.0)} title="Click to reset to 100%">{Math.round(canvasScale * 100)}%</span>
               <button className="zoom-popover-icon-btn" onClick={() => setCanvasScale(s => Math.min(3.0, Number((s + 0.15).toFixed(2))))} title="Zoom In">+</button>

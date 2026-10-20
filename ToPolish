@@ -1,3 +1,4 @@
+
 Android
 	Tapping with 2 fingers brings a menu to paste, undo and select all DONE
 	Right click menu not functional from 3 dots is not working DONE
@@ -33,9 +34,9 @@ Linux
 	GRID FIX -- NP
 	ANTIALIASING -- NP
 
-	Text Editing not registering
-	Taskbox element not functioning properly in both android and linux
-	Zoom still needs to fixed -- there is variable canvas width smh that makes the zooming in and out jittery and not smooht like the elements are moving someplace else then snapping back
+	Text Editing not registering DONE
+	Taskbox element not functioning properly in both android and linux DONE
+	Zoom still needs to fixed -- there is variable canvas width smh that makes the zooming in and out jittery and not smooht like the elements are moving someplace else then snapping back DONE
 
 	
 Common

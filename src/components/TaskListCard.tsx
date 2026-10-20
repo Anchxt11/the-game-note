@@ -50,176 +50,44 @@ export const TaskListCard: React.FC<TaskListCardProps> = ({
   const dropIndexRef = useRef<number | null>(null);
   const portalPreviewRef = useRef<HTMLDivElement | null>(null);
   const portalPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const lastPointerPosRef = useRef<{ clientX: number; clientY: number }>({ clientX: 0, clientY: 0 });
 
-  const handlePointerMove = useCallback((e: PointerEvent | MouseEvent) => {
-    if (!dragRef.current) return;
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const elRef = useRef(el);
+  elRef.current = el;
+  const onContentChangeRef = useRef(onContentChange);
+  onContentChangeRef.current = onContentChange;
+  const onDetachOrMergeTaskRef = useRef(onDetachOrMergeTask);
+  onDetachOrMergeTaskRef.current = onDetachOrMergeTask;
 
-    const { itemId, startX, startY, offsetX, offsetY } = dragRef.current;
-    const dist = Math.hypot(e.clientX - startX, e.clientY - startY);
+  const cleanupListenersRef = useRef<(() => void) | null>(null);
 
-    if (!dragRef.current.hasExceededThreshold && dist < 6) {
-      return;
+  const endDragSession = useCallback(() => {
+    if (cleanupListenersRef.current) {
+      cleanupListenersRef.current();
+      cleanupListenersRef.current = null;
     }
-
-    if (!dragRef.current.hasExceededThreshold) {
-      dragRef.current.hasExceededThreshold = true;
-      setActiveDragId(itemId);
-      document.body.style.cursor = 'grabbing';
-    }
-
-    const currentLeft = e.clientX - offsetX;
-    const currentTop = e.clientY - offsetY;
-    portalPosRef.current = { x: currentLeft, y: currentTop };
-
-    if (portalPreviewRef.current) {
-      portalPreviewRef.current.style.transform = `translate3d(${currentLeft}px, ${currentTop}px, 0)`;
-    }
-
-    const cardEl = containerRef.current?.closest('.milanote-card') || containerRef.current;
-    let isOutside = true;
-    if (cardEl) {
-      const cardRect = cardEl.getBoundingClientRect();
-      if (
-        e.clientX >= cardRect.left &&
-        e.clientX <= cardRect.right &&
-        e.clientY >= cardRect.top &&
-        e.clientY <= cardRect.bottom
-      ) {
-        isOutside = false;
-      }
-    }
-
-    const prevHighlight = document.querySelector('.task-list-merge-target');
-    if (isOutside) {
-      if (dropIndexRef.current !== null) {
-        dropIndexRef.current = null;
-        setDropIndex(null);
-      }
-
-      const elementsUnder = document.elementsFromPoint ? document.elementsFromPoint(e.clientX, e.clientY) : [];
-      let foundOtherCard: HTMLElement | null = null;
-      for (const elem of elementsUnder) {
-        const cardWrapper = elem.closest('.milanote-card.task-list-card-wrapper') as HTMLElement | null;
-        if (cardWrapper && cardWrapper.id && cardWrapper.id !== `milanote-el-${el.id}`) {
-          foundOtherCard = cardWrapper;
-          break;
-        }
-      }
-
-      if (prevHighlight && prevHighlight !== foundOtherCard) {
-        prevHighlight.classList.remove('task-list-merge-target');
-      }
-      if (foundOtherCard && !foundOtherCard.classList.contains('task-list-merge-target')) {
-        foundOtherCard.classList.add('task-list-merge-target');
-      }
-    } else {
-      if (prevHighlight) {
-        prevHighlight.classList.remove('task-list-merge-target');
-      }
-
-      const nonDraggedItems = items.filter((item) => item.id !== itemId);
-      let targetIdx = nonDraggedItems.length;
-
-      for (let i = 0; i < nonDraggedItems.length; i++) {
-        const childDiv = document.getElementById(`milanote-task-item-${nonDraggedItems[i].id}`);
-        if (childDiv) {
-          const rect = childDiv.getBoundingClientRect();
-          const midY = rect.top + rect.height / 2;
-          if (e.clientY < midY) {
-            targetIdx = i;
-            break;
-          }
-        }
-      }
-
-      if (dropIndexRef.current !== targetIdx) {
-        dropIndexRef.current = targetIdx;
-        setDropIndex(targetIdx);
-      }
-    }
-  }, [items, el.id]);
-
-  const handlePointerUp = useCallback((e: PointerEvent | MouseEvent) => {
-    window.removeEventListener('pointermove', handlePointerMove);
-    window.removeEventListener('pointerup', handlePointerUp);
-    window.removeEventListener('pointercancel', handlePointerUp);
-    window.removeEventListener('mousemove', handlePointerMove);
-    window.removeEventListener('mouseup', handlePointerUp);
-
     document.body.style.cursor = '';
     document.querySelectorAll('.task-list-merge-target').forEach((target) => {
       target.classList.remove('task-list-merge-target');
     });
-
-    if (!dragRef.current) return;
-    const { itemId, hasExceededThreshold } = dragRef.current;
-    const targetDropIndex = dropIndexRef.current;
     dragRef.current = null;
     dropIndexRef.current = null;
     setActiveDragId(null);
     setDropIndex(null);
-
-    if (!hasExceededThreshold) return;
-
-    const draggedItem = items.find((x) => x.id === itemId);
-    if (!draggedItem) return;
-
-    const cardEl = containerRef.current?.closest('.milanote-card') || containerRef.current;
-    let releasedOutside = true;
-    if (cardEl && e.clientX !== undefined && e.clientY !== undefined) {
-      const rect = cardEl.getBoundingClientRect();
-      if (
-        e.clientX >= rect.left &&
-        e.clientX <= rect.right &&
-        e.clientY >= rect.top &&
-        e.clientY <= rect.bottom
-      ) {
-        releasedOutside = false;
-      }
-    }
-
-    if (releasedOutside) {
-      if (onDetachOrMergeTask) {
-        onDetachOrMergeTask(el.id, draggedItem, e.clientX, e.clientY);
-      }
-    } else if (targetDropIndex !== null) {
-      const nonDragged = items.filter((x) => x.id !== itemId);
-      const prevKey = targetDropIndex > 0 ? (nonDragged[targetDropIndex - 1]?.order_index || null) : null;
-      const nextKey = targetDropIndex < nonDragged.length ? (nonDragged[targetDropIndex]?.order_index || null) : null;
-      let newOrderIndex: string;
-      try {
-        newOrderIndex = generateKeyBetween(prevKey, nextKey);
-      } catch {
-        newOrderIndex = 'a0';
-      }
-      const updatedDragged = { ...draggedItem, order_index: newOrderIndex };
-      const newItems = [
-        ...nonDragged.slice(0, targetDropIndex),
-        updatedDragged,
-        ...nonDragged.slice(targetDropIndex),
-      ];
-      onContentChange(el.id, { ...el.content, items: newItems });
-    }
-  }, [handlePointerMove, items, el.id, el.content, onContentChange, onDetachOrMergeTask]);
+  }, []);
 
   useEffect(() => {
     return () => {
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', handlePointerUp);
-      window.removeEventListener('pointercancel', handlePointerUp);
-      window.removeEventListener('mousemove', handlePointerMove);
-      window.removeEventListener('mouseup', handlePointerUp);
-      document.body.style.cursor = '';
-      document.querySelectorAll('.task-list-merge-target').forEach((target) => {
-        target.classList.remove('task-list-merge-target');
-      });
+      endDragSession();
     };
-  }, [handlePointerMove, handlePointerUp]);
+  }, [endDragSession]);
 
   const handleItemStart = (e: React.PointerEvent | React.MouseEvent, item: TaskItem) => {
     e.preventDefault();
     e.stopPropagation();
-    if (e.button !== 0 || items.length <= 1) return;
+    if (e.button !== 0 || itemsRef.current.length <= 1) return;
     if (dragRef.current) return;
 
     const targetEl = (e.currentTarget as HTMLElement).closest('.checklist-item') as HTMLElement || (e.currentTarget as HTMLElement);
@@ -237,6 +105,7 @@ export const TaskListCard: React.FC<TaskListCardProps> = ({
       hasExceededThreshold: false,
     };
 
+    lastPointerPosRef.current = { clientX: e.clientX, clientY: e.clientY };
     portalPosRef.current = {
       x: rect.left,
       y: rect.top,
@@ -245,11 +114,165 @@ export const TaskListCard: React.FC<TaskListCardProps> = ({
     dropIndexRef.current = null;
     setDropIndex(null);
 
-    window.addEventListener('pointermove', handlePointerMove, { passive: false });
-    window.addEventListener('pointerup', handlePointerUp, { passive: false });
-    window.addEventListener('pointercancel', handlePointerUp, { passive: false });
-    window.addEventListener('mousemove', handlePointerMove);
-    window.addEventListener('mouseup', handlePointerUp);
+    const onPointerMove = (ev: PointerEvent | MouseEvent) => {
+      if (!dragRef.current) return;
+      lastPointerPosRef.current = { clientX: ev.clientX, clientY: ev.clientY };
+
+      const { itemId: curItemId, startX, startY, offsetX: offX, offsetY: offY } = dragRef.current;
+      const dist = Math.hypot(ev.clientX - startX, ev.clientY - startY);
+
+      if (!dragRef.current.hasExceededThreshold && dist < 6) {
+        return;
+      }
+
+      if (!dragRef.current.hasExceededThreshold) {
+        dragRef.current.hasExceededThreshold = true;
+        setActiveDragId(curItemId);
+        document.body.style.cursor = 'grabbing';
+      }
+
+      const currentLeft = ev.clientX - offX;
+      const currentTop = ev.clientY - offY;
+      portalPosRef.current = { x: currentLeft, y: currentTop };
+
+      if (portalPreviewRef.current) {
+        portalPreviewRef.current.style.transform = `translate3d(${currentLeft}px, ${currentTop}px, 0)`;
+      }
+
+      const cardEl = containerRef.current?.closest('.milanote-card') || containerRef.current;
+      let isOutside = true;
+      if (cardEl) {
+        const cardRect = cardEl.getBoundingClientRect();
+        if (
+          ev.clientX >= cardRect.left &&
+          ev.clientX <= cardRect.right &&
+          ev.clientY >= cardRect.top &&
+          ev.clientY <= cardRect.bottom
+        ) {
+          isOutside = false;
+        }
+      }
+
+      const prevHighlight = document.querySelector('.task-list-merge-target');
+      if (isOutside) {
+        if (dropIndexRef.current !== null) {
+          dropIndexRef.current = null;
+          setDropIndex(null);
+        }
+
+        const elementsUnder = document.elementsFromPoint ? document.elementsFromPoint(ev.clientX, ev.clientY) : [];
+        let foundOtherCard: HTMLElement | null = null;
+        for (const elem of elementsUnder) {
+          const cardWrapper = elem.closest('.milanote-card.task-list-card-wrapper') as HTMLElement | null;
+          if (cardWrapper && cardWrapper.id && cardWrapper.id !== `milanote-el-${elRef.current.id}`) {
+            foundOtherCard = cardWrapper;
+            break;
+          }
+        }
+
+        if (prevHighlight && prevHighlight !== foundOtherCard) {
+          prevHighlight.classList.remove('task-list-merge-target');
+        }
+        if (foundOtherCard && !foundOtherCard.classList.contains('task-list-merge-target')) {
+          foundOtherCard.classList.add('task-list-merge-target');
+        }
+      } else {
+        if (prevHighlight) {
+          prevHighlight.classList.remove('task-list-merge-target');
+        }
+
+        const curItems = itemsRef.current;
+        const nonDraggedItems = curItems.filter((it) => it.id !== curItemId);
+        let targetIdx = nonDraggedItems.length;
+
+        for (let i = 0; i < nonDraggedItems.length; i++) {
+          const childDiv = document.getElementById(`milanote-task-item-${nonDraggedItems[i].id}`);
+          if (childDiv) {
+            const r = childDiv.getBoundingClientRect();
+            const midY = r.top + r.height / 2;
+            if (ev.clientY < midY) {
+              targetIdx = i;
+              break;
+            }
+          }
+        }
+
+        if (dropIndexRef.current !== targetIdx) {
+          dropIndexRef.current = targetIdx;
+          setDropIndex(targetIdx);
+        }
+      }
+    };
+
+    const onPointerUp = (ev: PointerEvent | MouseEvent) => {
+      const clientX = ev.clientX !== undefined && ev.clientX !== 0 ? ev.clientX : lastPointerPosRef.current.clientX;
+      const clientY = ev.clientY !== undefined && ev.clientY !== 0 ? ev.clientY : lastPointerPosRef.current.clientY;
+
+      const curDrag = dragRef.current;
+      const targetDropIndex = dropIndexRef.current;
+
+      endDragSession();
+
+      if (!curDrag || !curDrag.hasExceededThreshold) return;
+
+      const curItems = itemsRef.current;
+      const draggedItem = curItems.find((x) => x.id === curDrag.itemId);
+      if (!draggedItem) return;
+
+      const currentEl = elRef.current;
+      const cardEl = containerRef.current?.closest('.milanote-card') || containerRef.current;
+      let releasedOutside = true;
+      if (cardEl && clientX !== undefined && clientY !== undefined) {
+        const rect = cardEl.getBoundingClientRect();
+        if (
+          clientX >= rect.left &&
+          clientX <= rect.right &&
+          clientY >= rect.top &&
+          clientY <= rect.bottom
+        ) {
+          releasedOutside = false;
+        }
+      }
+
+      if (releasedOutside) {
+        if (onDetachOrMergeTaskRef.current) {
+          onDetachOrMergeTaskRef.current(currentEl.id, draggedItem, clientX, clientY);
+        }
+      } else if (targetDropIndex !== null) {
+        const nonDragged = curItems.filter((x) => x.id !== curDrag.itemId);
+        const prevKey = targetDropIndex > 0 ? (nonDragged[targetDropIndex - 1]?.order_index || null) : null;
+        const nextKey = targetDropIndex < nonDragged.length ? (nonDragged[targetDropIndex]?.order_index || null) : null;
+        let newOrderIndex: string;
+        try {
+          newOrderIndex = generateKeyBetween(prevKey, nextKey);
+        } catch {
+          newOrderIndex = 'a0';
+        }
+        const updatedDragged = { ...draggedItem, order_index: newOrderIndex };
+        const newItems = [
+          ...nonDragged.slice(0, targetDropIndex),
+          updatedDragged,
+          ...nonDragged.slice(targetDropIndex),
+        ];
+        onContentChangeRef.current(currentEl.id, { ...currentEl.content, items: newItems });
+      }
+    };
+
+    const removeListeners = () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+      window.removeEventListener('mousemove', onPointerMove);
+      window.removeEventListener('mouseup', onPointerUp);
+    };
+
+    cleanupListenersRef.current = removeListeners;
+
+    window.addEventListener('pointermove', onPointerMove, { passive: false });
+    window.addEventListener('pointerup', onPointerUp, { passive: false });
+    window.addEventListener('pointercancel', onPointerUp, { passive: false });
+    window.addEventListener('mousemove', onPointerMove);
+    window.addEventListener('mouseup', onPointerUp);
   };
 
   const isDragActive = Boolean(activeDragId && dragRef.current?.hasExceededThreshold);

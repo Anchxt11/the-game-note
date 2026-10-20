@@ -141,14 +141,44 @@ const NoteRichEditorComponent: React.FC<NoteRichEditorComponentProps> = ({
     rawText.includes('<blockquote');
 
   const cleanHtml = (rawText.replace(/<[^>]*>/g, '').trim() === '' && !hasFormatting) ? '' : rawText;
+  const lastHtmlRef = useRef<string>(cleanHtml);
+  const prevEditingRef = useRef(isEditing);
+
+  const contentRef = useRef(content);
+  contentRef.current = content;
+  const onContentChangeRef = useRef(onContentChange);
+  onContentChangeRef.current = onContentChange;
+
+  const flushChanges = useCallback(() => {
+    const el = editorRef.current;
+    if (!el) return;
+    const text = el.textContent || '';
+    const html = el.innerHTML;
+    const hasFmt = html.includes('<ul') || html.includes('<ol') || html.includes('<li') || html.includes('text-align') || html.includes('&nbsp;') || html.includes('\u00A0') || html.includes('<h') || html.includes('<pre') || html.includes('<blockquote') || text.length > 0;
+    const cleanText = (text.trim() === '' && !hasFmt) ? '' : html;
+    const curContent = contentRef.current;
+    if (cleanText !== (curContent.text || '')) {
+      lastHtmlRef.current = cleanText;
+      onContentChangeRef.current(id, { ...curContent, text: cleanText });
+    }
+  }, [id]);
 
   useLayoutEffect(() => {
     const el = editorRef.current;
     if (!el) return;
 
-    // If DOM innerHTML already matches cleanHtml, DO NOT touch innerHTML!
-    // Touching innerHTML destroys child DOM nodes and causes the caret to jump to 0.
-    if (el.innerHTML === cleanHtml) {
+    const wasEditing = prevEditingRef.current;
+    prevEditingRef.current = isEditing;
+
+    // If editing just finished (e.g. clicked away from textbox), immediately flush changes
+    // and DO NOT overwrite DOM with stale cleanHtml!
+    if (wasEditing && !isEditing) {
+      flushChanges();
+      return;
+    }
+
+    // If DOM innerHTML already matches cleanHtml or last user input, DO NOT touch innerHTML!
+    if (el.innerHTML === cleanHtml || (isEditing && el.innerHTML === lastHtmlRef.current)) {
       return;
     }
 
@@ -165,7 +195,13 @@ const NoteRichEditorComponent: React.FC<NoteRichEditorComponentProps> = ({
     }
 
     el.innerHTML = cleanHtml;
-  }, [cleanHtml, isEditing]);
+  }, [cleanHtml, isEditing, flushChanges]);
+
+  useEffect(() => {
+    return () => {
+      flushChanges();
+    };
+  }, [flushChanges]);
 
   useEffect(() => {
     if (!isEditing) return;
@@ -274,14 +310,10 @@ const NoteRichEditorComponent: React.FC<NoteRichEditorComponentProps> = ({
             target.innerHTML = '';
           }
         }
+        lastHtmlRef.current = target.innerHTML;
       }}
-      onBlur={(e) => {
-        const target = e.currentTarget;
-        const text = target.textContent || '';
-        const html = target.innerHTML;
-        const hasFmt = html.includes('<ul') || html.includes('<ol') || html.includes('<li') || html.includes('text-align') || html.includes('&nbsp;') || html.includes('\u00A0') || text.length > 0;
-        const cleanText = (text.trim() === '' && !hasFmt) ? '' : html;
-        onContentChange(id, { ...content, text: cleanText });
+      onBlur={() => {
+        flushChanges();
       }}
     />
   );
@@ -305,12 +337,37 @@ const ImageCaptionEditorComponent: React.FC<ImageCaptionEditorComponentProps> = 
   const editorRef = useRef<HTMLDivElement>(null);
   const lastSavedSelRef = useRef<SavedSelection | null>(null);
   const cleanCaption = caption || '';
+  const lastCaptionRef = useRef<string>(cleanCaption);
+  const prevEditingRef = useRef(isEditing);
+
+  const elContentRef = useRef(elContent);
+  elContentRef.current = elContent;
+  const onContentChangeRef = useRef(onContentChange);
+  onContentChangeRef.current = onContentChange;
+
+  const flushChanges = useCallback(() => {
+    const el = editorRef.current;
+    if (!el) return;
+    const curContent = elContentRef.current;
+    if (curContent.caption !== el.innerHTML) {
+      lastCaptionRef.current = el.innerHTML;
+      onContentChangeRef.current(id, { ...curContent, caption: el.innerHTML });
+    }
+  }, [id]);
 
   useLayoutEffect(() => {
     const el = editorRef.current;
     if (!el) return;
 
-    if (el.innerHTML === cleanCaption) {
+    const wasEditing = prevEditingRef.current;
+    prevEditingRef.current = isEditing;
+
+    if (wasEditing && !isEditing) {
+      flushChanges();
+      return;
+    }
+
+    if (el.innerHTML === cleanCaption || (isEditing && el.innerHTML === lastCaptionRef.current)) {
       return;
     }
 
@@ -327,7 +384,13 @@ const ImageCaptionEditorComponent: React.FC<ImageCaptionEditorComponentProps> = 
     }
 
     el.innerHTML = cleanCaption;
-  }, [cleanCaption, isEditing]);
+  }, [cleanCaption, isEditing, flushChanges]);
+
+  useEffect(() => {
+    return () => {
+      flushChanges();
+    };
+  }, [flushChanges]);
 
   useEffect(() => {
     if (!isEditing) return;
@@ -353,10 +416,11 @@ const ImageCaptionEditorComponent: React.FC<ImageCaptionEditorComponentProps> = 
       suppressContentEditableWarning={true}
       data-placeholder="Add a caption..."
       style={{ color: '#e4ebf7', minHeight: '20px', outline: 'none', fontSize: '13.5px' }}
-      onBlur={(e) => {
-        if (elContent.caption !== e.currentTarget.innerHTML) {
-          onContentChange(id, { ...elContent, caption: e.currentTarget.innerHTML });
-        }
+      onInput={(e) => {
+        lastCaptionRef.current = e.currentTarget.innerHTML;
+      }}
+      onBlur={() => {
+        flushChanges();
       }}
     />
   );
@@ -685,6 +749,7 @@ export interface CanvasProps {
   onCanvasClick?: () => void;
   onTwoFingerTap?: (canvasX: number, canvasY: number, clientX?: number, clientY?: number, targetEl?: Element | null) => void;
   onUploadImageForElement?: (elementId: string, dataUrl: string) => void;
+  onMinScaleChange?: (minScale: number) => void;
 }
 
 const ICON_NAME_MAP: Record<string, any> = {
@@ -946,8 +1011,10 @@ export const Canvas: React.FC<CanvasProps> = ({
   onCanvasClick,
   onTwoFingerTap,
   onUploadImageForElement,
+  onMinScaleChange,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
+  const minScaleRef = useRef(0.40);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
   const isPanningRef = useRef(false);
@@ -1179,116 +1246,117 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
 
     const hasElements = activeEls.length > 0;
-    const contentMinX = hasElements ? minElX : 0;
-    const contentMaxX = hasElements ? maxElX : 800;
-    const contentMinY = hasElements ? minElY : 0;
-    const contentMaxY = hasElements ? maxElY : 600;
-
-    // Ideal centered pan coordinates that place the active content in the center of the viewport
-    const centerPanX = Math.round((vpWidth - (contentMinX + contentMaxX) * currentScale) / 2);
-    const centerPanY = Math.round((vpHeight - (contentMinY + contentMaxY) * currentScale) / 2);
-
     const isDesktop = !isTouchPrimary() && !isPhoneScreen();
     const isPhone = isPhoneScreen();
 
-    // Desktop: ONLY disable panning when FULLY zoomed out (scale <= 0.22).
-    // At normal zoom levels (scale > 0.22), allow full, generous panning across the board workspace!
-    if (isDesktop) {
-      if (currentScale <= 0.22) {
-        return {
-          bounds: { minX: contentMinX, maxX: contentMaxX, minY: contentMinY, maxY: contentMaxY },
-          panLimits: { minPanX: centerPanX, maxPanX: centerPanX, minPanY: centerPanY, maxPanY: centerPanY },
-          centerPan: { x: centerPanX, y: centerPanY },
-          contentDimensions: {
-            screenW: (contentMaxX - contentMinX) * currentScale,
-            screenH: (contentMaxY - contentMinY) * currentScale,
-          },
-        };
-      }
-
-      // Generous desktop workspace extents for free panning at normal zoom levels
-      const HEADROOM_X = 600;
-      const HEADROOM_Y = 500;
-      const boardMinX = Math.min(0, contentMinX - HEADROOM_X);
-      const boardMaxX = Math.max(1600, contentMaxX + HEADROOM_X);
-      const boardMinY = Math.min(0, contentMinY - HEADROOM_Y);
-      const boardMaxY = Math.max(1200, contentMaxY + HEADROOM_Y);
-
-      // Smooth blend factor as scale approaches fully zoomed out (0.22)
-      const blend = Math.min(1, Math.max(0, (currentScale - 0.22) / 0.12));
-
-      const rawMinPanX = Math.round(vpWidth - boardMaxX * currentScale);
-      const rawMaxPanX = Math.round(-boardMinX * currentScale);
-      const rawMinPanY = Math.round(vpHeight - boardMaxY * currentScale);
-      const rawMaxPanY = Math.round(-boardMinY * currentScale);
-
-      const minPanX = Math.round(centerPanX + (rawMinPanX - centerPanX) * blend);
-      const maxPanX = Math.round(centerPanX + (rawMaxPanX - centerPanX) * blend);
-      const minPanY = Math.round(centerPanY + (rawMinPanY - centerPanY) * blend);
-      const maxPanY = Math.round(centerPanY + (rawMaxPanY - centerPanY) * blend);
-
+    // If board is empty, base canvas is strictly fixed to the visible canvas size.
+    // Panning is disabled and scrollbars are hidden.
+    if (!hasElements) {
+      minScaleRef.current = 0.40;
       return {
-        bounds: { minX: boardMinX, maxX: boardMaxX, minY: boardMinY, maxY: boardMaxY },
-        panLimits: {
-          minPanX: Math.min(minPanX, maxPanX),
-          maxPanX: Math.max(minPanX, maxPanX),
-          minPanY: Math.min(minPanY, maxPanY),
-          maxPanY: Math.max(minPanY, maxPanY),
-        },
+        bounds: { minX: 0, maxX: vpWidth / currentScale, minY: 0, maxY: vpHeight / currentScale },
+        panLimits: { minPanX: 0, maxPanX: 0, minPanY: 0, maxPanY: 0 },
+        centerPan: { x: 0, y: 0 },
+        minScale: 0.40,
+        contentDimensions: { screenW: 0, screenH: 0 },
+      };
+    }
+
+    const contentMinX = minElX;
+    const contentMaxX = maxElX;
+    const contentMinY = minElY;
+    const contentMaxY = maxElY;
+
+    const contentW = Math.max(1, contentMaxX - contentMinX);
+    const contentH = Math.max(1, contentMaxY - contentMinY);
+    const contentCenterX = (contentMinX + contentMaxX) / 2;
+    const contentCenterY = (contentMinY + contentMaxY) / 2;
+
+    // Viewport padding for scale-to-fit calculation
+    const padX = isPhone ? 40 : 140;
+    const padY = isPhone ? 40 : 140;
+    const availW = Math.max(100, vpWidth - padX);
+    const availH = Math.max(100, vpHeight - padY);
+
+    const fitScaleX = availW / contentW;
+    const fitScaleY = availH / contentH;
+    const calculatedFitScale = Math.min(fitScaleX, fitScaleY);
+
+    // Lowest zoom is 40% (0.40) by default.
+    // Drops dynamically below 0.40 (e.g. 0.33, 0.27, etc.) so all elements fit inside visible canvas when fully zoomed out!
+    const minScale = calculatedFitScale < 0.40
+      ? Math.max(0.05, Number(calculatedFitScale.toFixed(2)))
+      : 0.40;
+
+    minScaleRef.current = minScale;
+
+    // Ideal centered pan coordinates that place active content in center of viewport
+    const centerPanX = Math.round((vpWidth - (contentMinX + contentMaxX) * currentScale) / 2);
+    const centerPanY = Math.round((vpHeight - (contentMinY + contentMaxY) * currentScale) / 2);
+
+    // Desktop: ONLY disable panning when FULLY zoomed out (scale <= minScale + 0.005).
+    // When fully zoomed out, elements are centered in viewport and panning is locked.
+    if (isDesktop && currentScale <= minScale + 0.005) {
+      return {
+        bounds: { minX: contentMinX, maxX: contentMaxX, minY: contentMinY, maxY: contentMaxY },
+        panLimits: { minPanX: centerPanX, maxPanX: centerPanX, minPanY: centerPanY, maxPanY: centerPanY },
         centerPan: { x: centerPanX, y: centerPanY },
+        minScale,
         contentDimensions: {
-          screenW: (contentMaxX - contentMinX) * currentScale,
-          screenH: (contentMaxY - contentMinY) * currentScale,
+          screenW: contentW * currentScale,
+          screenH: contentH * currentScale,
         },
       };
     }
 
-    // Android Phone & Tablet:
-    // Increased usable canvas size with generous headroom around content
-    const padX = isPhone ? 12 : 24;
-    const padY = isPhone ? 12 : 24;
+    // Base visible canvas at minScale (what is visible when zoomed out)
+    const baseW = vpWidth / minScale;
+    const baseH = vpHeight / minScale;
+    const baseMinX = contentCenterX - baseW / 2;
+    const baseMaxX = contentCenterX + baseW / 2;
+    const baseMinY = contentCenterY - baseH / 2;
+    const baseMaxY = contentCenterY + baseH / 2;
 
-    const marginHeadroomX = isPhone ? 450 : 650;
-    const marginHeadroomY = isPhone ? 400 : 550;
-    const minCanvasW = isPhone ? 1200 : 1600;
-    const minCanvasH = isPhone ? 1000 : 1300;
+    // Incremental expansion: base empty canvas is fixed to visible canvas size;
+    // this area only increases when user puts elements near edges to provide more space
+    const EDGE_THRESHOLD = 250;
+    const HEADROOM = isDesktop ? 600 : (isPhone ? 350 : 450);
 
-    const boardMinX = Math.min(0, contentMinX - marginHeadroomX);
-    const boardMaxX = Math.max(minCanvasW, contentMaxX + marginHeadroomX);
-    const boardMinY = Math.min(0, contentMinY - marginHeadroomY);
-    const boardMaxY = Math.max(minCanvasH, contentMaxY + marginHeadroomY);
+    const boardMinX = contentMinX <= baseMinX + EDGE_THRESHOLD
+      ? Math.min(baseMinX, contentMinX - HEADROOM)
+      : baseMinX;
 
-    const contentScreenW = (contentMaxX - contentMinX) * currentScale;
-    const contentScreenH = (contentMaxY - contentMinY) * currentScale;
+    const boardMaxX = contentMaxX >= baseMaxX - EDGE_THRESHOLD
+      ? Math.max(baseMaxX, contentMaxX + HEADROOM)
+      : baseMaxX;
 
-    // Smooth bounded pan travel on phone/tablet: content cannot leave screen when zoomed out,
-    // with generous travel room when navigating or zoomed in
-    const availX = (vpWidth - 2 * padX) - contentScreenW;
-    const extraMarginX = availX < 0
-      ? Math.min(marginHeadroomX * currentScale, -availX * 0.45)
-      : Math.min(100, availX * 0.25);
-    const halfSpanX = Math.abs(availX) / 2 + extraMarginX;
-    const minPanX = Math.round(centerPanX - halfSpanX);
-    const maxPanX = Math.round(centerPanX + halfSpanX);
+    const boardMinY = contentMinY <= baseMinY + EDGE_THRESHOLD
+      ? Math.min(baseMinY, contentMinY - HEADROOM)
+      : baseMinY;
 
-    const availY = (vpHeight - 2 * padY) - contentScreenH;
-    const extraMarginY = availY < 0
-      ? Math.min(marginHeadroomY * currentScale, -availY * 0.45)
-      : Math.min(100, availY * 0.25);
-    const halfSpanY = Math.abs(availY) / 2 + extraMarginY;
-    const minPanY = Math.round(centerPanY - halfSpanY);
-    const maxPanY = Math.round(centerPanY + halfSpanY);
+    const boardMaxY = contentMaxY >= baseMaxY - EDGE_THRESHOLD
+      ? Math.max(baseMaxY, contentMaxY + HEADROOM)
+      : baseMaxY;
+
+    const rawMinPanX = Math.round(vpWidth - boardMaxX * currentScale);
+    const rawMaxPanX = Math.round(-boardMinX * currentScale);
+    const rawMinPanY = Math.round(vpHeight - boardMaxY * currentScale);
+    const rawMaxPanY = Math.round(-boardMinY * currentScale);
 
     return {
       bounds: { minX: boardMinX, maxX: boardMaxX, minY: boardMinY, maxY: boardMaxY },
       panLimits: {
-        minPanX: Math.min(minPanX, maxPanX),
-        maxPanX: Math.max(minPanX, maxPanX),
-        minPanY: Math.min(minPanY, maxPanY),
-        maxPanY: Math.max(minPanY, maxPanY),
+        minPanX: Math.min(rawMinPanX, rawMaxPanX),
+        maxPanX: Math.max(rawMinPanX, rawMaxPanX),
+        minPanY: Math.min(rawMinPanY, rawMaxPanY),
+        maxPanY: Math.max(rawMinPanY, rawMaxPanY),
       },
       centerPan: { x: centerPanX, y: centerPanY },
-      contentDimensions: { screenW: contentScreenW, screenH: contentScreenH },
+      minScale,
+      contentDimensions: {
+        screenW: contentW * currentScale,
+        screenH: contentH * currentScale,
+      },
     };
   }, [elements]);
 
@@ -1321,29 +1389,61 @@ export const Canvas: React.FC<CanvasProps> = ({
     const rect = containerRef.current.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return { x: focalPanX, y: focalPanY };
 
-    const { centerPan, contentDimensions } = getPanLimits(rect.width, rect.height, newScale);
-    const padX = isPhoneScreen() ? 16 : 36;
-    const padY = isPhoneScreen() ? 16 : 36;
-
-    // On desktop, as the canvas is zoomed out and content fits inside the viewport (or approaches min zoom),
-    // smoothly converge the focal point to the viewport center so elements effortlessly zoom out to the center!
     const isDesktop = !isTouchPrimary() && !isPhoneScreen();
-    let targetX = focalPanX;
-    let targetY = focalPanY;
+    const { centerPan, minScale } = getPanLimits(rect.width, rect.height, newScale);
 
+    // On desktop:
+    // With the only exception of elements being in the center with panning disabled in desktop when fully zoomed out (scale <= minScale):
     if (isDesktop) {
-      const availW = Math.max(1, rect.width - 2 * padX);
-      const availH = Math.max(1, rect.height - 2 * padY);
-      const ratioX = Math.max(0, Math.min(1, contentDimensions.screenW / availW));
-      const ratioY = Math.max(0, Math.min(1, contentDimensions.screenH / availH));
-
-      // Ease towards centerPan as content gets smaller than viewport:
-      targetX = Math.round(centerPan.x + (focalPanX - centerPan.x) * ratioX);
-      targetY = Math.round(centerPan.y + (focalPanY - centerPan.y) * ratioY);
+      if (newScale <= minScale + 0.005) {
+        return { x: centerPan.x, y: centerPan.y };
+      }
+      if (newScale < minScale + 0.05) {
+        const t = (minScale + 0.05 - newScale) / 0.05;
+        const smoothT = t * t * (3 - 2 * t);
+        const targetX = Math.round(focalPanX + (centerPan.x - focalPanX) * smoothT);
+        const targetY = Math.round(focalPanY + (centerPan.y - focalPanY) * smoothT);
+        return clampPan(targetX, targetY, newScale);
+      }
     }
 
-    return clampPan(targetX, targetY, newScale);
+    return clampPan(focalPanX, focalPanY, newScale);
   }, [clampPan, getPanLimits]);
+
+  // Synchronize dynamic minScale with App and re-center when elements change while fully zoomed out
+  const prevReportedMinScaleRef = useRef(0.40);
+  const isInitialMountRef = useRef(true);
+  const prevMinScaleRef = useRef(0.40);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const rect = containerRef.current.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    const { minScale, centerPan } = getPanLimits(rect.width, rect.height, scaleRef.current);
+
+    if (minScale !== prevReportedMinScaleRef.current) {
+      prevReportedMinScaleRef.current = minScale;
+      onMinScaleChange?.(minScale);
+    }
+
+    const prevMin = prevMinScaleRef.current;
+    prevMinScaleRef.current = minScale;
+    const isDesktop = !isTouchPrimary() && !isPhoneScreen();
+
+    if (isInitialMountRef.current) {
+      isInitialMountRef.current = false;
+      if (scaleRef.current <= minScale + 0.005) {
+        setPan(centerPan);
+      }
+      return;
+    }
+
+    // If user was fully zoomed out on desktop (e.g. at 40%), and elements change:
+    // Re-center so the cluster shifts smoothly to remain centered ("it shifts a bit")!
+    if (isDesktop && scaleRef.current <= prevMin + 0.005) {
+      setPan(centerPan);
+    }
+  }, [elements, getPanLimits, onMinScaleChange]);
 
   // Dynamic pan adjustment when zoom scale changes externally (e.g. zoom buttons/slider/scale-to-fit)
   const prevScaleRef = useRef(scale);
@@ -1713,7 +1813,11 @@ export const Canvas: React.FC<CanvasProps> = ({
       const zoomFactor = Math.exp(-delta * 0.002);
 
       const baseTarget = targetScaleRef.current ?? scaleRef.current;
-      let newTarget = Math.min(3.0, Math.max(0.15, baseTarget * zoomFactor));
+      const curMin = minScaleRef.current;
+      let newTarget = Math.min(3.0, Math.max(curMin, baseTarget * zoomFactor));
+      if (newTarget <= curMin + 0.005) {
+        newTarget = curMin;
+      }
 
       // Magnetic snap to 100% (1.000):
       // If crossing or approaching 1.0 within a snap threshold (0.94 to 1.06)
@@ -1761,6 +1865,9 @@ export const Canvas: React.FC<CanvasProps> = ({
         targetScaleRef.current = null;
         zoomOriginRef.current = null;
         isZoomingRef.current = false;
+      }
+      if (!isTouchPrimary() && !isPhoneScreen() && scaleRef.current <= minScaleRef.current + 0.005) {
+        return;
       }
       setPan((prev) => clampPan(prev.x - e.deltaX, prev.y - e.deltaY));
     }
@@ -1979,6 +2086,9 @@ export const Canvas: React.FC<CanvasProps> = ({
     if (isCanvasBg) {
       // 1. Middle-click or Spacebar + Left Click = PANNING
       if (e.button === 1 || e.buttons === 4 || (isSpacePressedRef.current && e.button === 0)) {
+        if (!isTouchPrimary() && !isPhoneScreen() && scaleRef.current <= minScaleRef.current + 0.005) {
+          return;
+        }
         e.preventDefault();
         isPanningRef.current = true;
         setIsPanning(true);
@@ -1992,6 +2102,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         const isCtrl = e.ctrlKey || e.metaKey;
         if (!isCtrl) {
           onSelectElement(null);
+          onSetEditingElement(null);
           if (onMultiSelect) onMultiSelect([]);
           onCanvasClick?.();
           selectionInitialIdsRef.current = [];
@@ -2300,7 +2411,11 @@ export const Canvas: React.FC<CanvasProps> = ({
           }
         }
         const factor = currentDist / initialDist;
-        let newScale = Math.min(3.0, Math.max(0.15, Number((initialScale * factor).toFixed(3))));
+        const curMin = minScaleRef.current;
+        let newScale = Math.min(3.0, Math.max(curMin, Number((initialScale * factor).toFixed(3))));
+        if (newScale <= curMin + 0.005) {
+          newScale = curMin;
+        }
         // Magnetic snap near 100% on pinch
         if (Math.abs(newScale - 1.0) < 0.035) {
           newScale = 1.0;
@@ -2373,6 +2488,9 @@ export const Canvas: React.FC<CanvasProps> = ({
       }
     }
     if (currentlyPanning && panStartRef.current) {
+      if (!isTouchPrimary() && !isPhoneScreen() && scaleRef.current <= minScaleRef.current + 0.005) {
+        return;
+      }
       const dx = e.clientX - panStartRef.current.x;
       const dy = e.clientY - panStartRef.current.y;
       setPan(clampPan(panStartRef.current.startPanX + dx, panStartRef.current.startPanY + dy));
@@ -3428,7 +3546,11 @@ export const Canvas: React.FC<CanvasProps> = ({
           }
 
           const factor = currentDist / initialDist;
-          let newScale = Math.min(3.0, Math.max(0.15, Number((initialScale * factor).toFixed(3))));
+          const curMin = minScaleRef.current;
+          let newScale = Math.min(3.0, Math.max(curMin, Number((initialScale * factor).toFixed(3))));
+          if (newScale <= curMin + 0.005) {
+            newScale = curMin;
+          }
           // Magnetic snap near 100% on pinch
           if (Math.abs(newScale - 1.0) < 0.035) {
             newScale = 1.0;
@@ -3585,6 +3707,7 @@ export const Canvas: React.FC<CanvasProps> = ({
 
     // Spacebar + Left click for panning (works over cards, notes, columns, lines)
     if (isSpacePressedRef.current && e.button === 0) {
+      if (!isTouchPrimary() && !isPhoneScreen() && scaleRef.current <= minScaleRef.current + 0.005) return;
       e.preventDefault();
       isPanningRef.current = true;
       setIsPanning(true);
@@ -3594,6 +3717,7 @@ export const Canvas: React.FC<CanvasProps> = ({
 
     // Middle-click also pans from anywhere
     if (e.button === 1 || e.buttons === 4) {
+      if (!isTouchPrimary() && !isPhoneScreen() && scaleRef.current <= minScaleRef.current + 0.005) return;
       e.preventDefault();
       isPanningRef.current = true;
       setIsPanning(true);
@@ -3923,6 +4047,7 @@ export const Canvas: React.FC<CanvasProps> = ({
 
   const handleLineMouseDown = (evt: React.MouseEvent | React.PointerEvent, el: Element) => {
     if (isSpacePressedRef.current && evt.button === 0) {
+      if (!isTouchPrimary() && !isPhoneScreen() && scaleRef.current <= minScaleRef.current + 0.005) return;
       evt.preventDefault();
       evt.stopPropagation();
       isPanningRef.current = true;
@@ -3931,6 +4056,7 @@ export const Canvas: React.FC<CanvasProps> = ({
       return;
     }
     if (evt.button === 1 || evt.buttons === 4) {
+      if (!isTouchPrimary() && !isPhoneScreen() && scaleRef.current <= minScaleRef.current + 0.005) return;
       evt.preventDefault();
       evt.stopPropagation();
       isPanningRef.current = true;
@@ -5170,7 +5296,7 @@ export const Canvas: React.FC<CanvasProps> = ({
   // Antialiased dot sizing with perceptual scaling
   const dotRadius = Math.max(0.65, Math.min(1.25, 0.82 * Math.pow(scale, 0.35)));
   // Smooth opacity falloff when zoomed out below 0.65x zoom to prevent high-frequency moiré noise
-  const fade = Math.min(1, Math.max(0, (scale - 0.15) / 0.45));
+  const fade = Math.min(1, Math.max(0, (scale - minScaleRef.current) / 0.35));
   const dotAlpha = Number((0.10 * fade).toFixed(3));
 
   return (
