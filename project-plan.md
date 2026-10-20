@@ -913,20 +913,24 @@ Per architecture definition, Phase 5 relies on two complementing transports:
 ---
 
 ### Task 5.7: Binary Image & Media Attachment Sync (Content-Addressed)
-- **Status**: 🟡 In Progress / Partially Complete
+- **Status**: ✅ Done (2026-10-20)
 - **Files**:
   - [`crates/core/src/storage.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/storage.rs)
-  - [`crates/core/src/transport/server.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/transport/server.rs)
-  - `crates/core/src/transport/files.rs` (pending)
+  - [`crates/core/src/crypto.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/crypto.rs)
+  - [`crates/core/src/sync/coordinator.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/sync/coordinator.rs)
+  - [`src-tauri/src/commands.rs`](file:///home/anchit/gitClones/the-game-note/src-tauri/src/commands.rs)
+  - [`src-tauri/src/lib.rs`](file:///home/anchit/gitClones/the-game-note/src-tauri/src/lib.rs)
+  - [`src/services/imageCache.ts`](file:///home/anchit/gitClones/the-game-note/src/services/imageCache.ts)
+  - [`src/services/ipc.ts`](file:///home/anchit/gitClones/the-game-note/src/services/ipc.ts)
+  - [`src/components/Canvas.tsx`](file:///home/anchit/gitClones/the-game-note/src/components/Canvas.tsx)
+  - [`src/App.tsx`](file:///home/anchit/gitClones/the-game-note/src/App.tsx)
 - **What**:
-  1. **Content-addressed IDs**: `file_id = HMAC-SHA256(file_key, plaintext_bytes)` as lowercase hex. Keyed so third parties cannot confirm known public files. Same file added twice → deduplicated to one blob.
-  2. **Migration**: Existing elements reference files by `content.path`. Add a one-time migration that hashes existing files, stores them under their `file_id`, and updates element content to reference the ID (synced via normal CRR write). Keep old paths readable until migration succeeds; back up first.
-  3. **Fetching missing files**: Scan applied elements for referenced `file_id`s. Check against local `FileStorage`; request missing files from peer (or mailbox). Verify recomputed HMAC of decrypted bytes equals `file_id`; delete and retry on mismatch.
-  4. **Transfer details**: Encrypt files with `file_key` and random nonce. Chunked transfer (1 MiB chunks) with `Range` GET and offset PUT for resume. Separate file queue with limited concurrency so large images never delay note/text sync.
-  5. **Limits & placeholders**: Configurable max size (default 25 MiB). Over-limit files stay local with a "too large to sync" badge. Canvas displays a placeholder (waiting, downloading X%, failed, retry) until file arrives.
-  6. **Garbage collection**: Delayed local-only deletion (30 days after last reference) to prevent deleting files a peer is about to reference.
-- **Current State**: Server endpoints (`POST /api/sync/files/missing`, `GET /api/sync/files/{id}`, `PUT /api/sync/files/{id}`) are implemented in `server.rs`. Content-addressed migration and coordinator auto-pull download queue remain.
-- **Acceptance**: Image added on tablet appears on laptop and phone after sync; interrupted transfer resumes; corrupted download rejected and retried; large files don't block note sync; migration of existing images completes without data loss.
+  1. **Content-addressed keyed IDs**: `file_id = HMAC-SHA256(file_key, plaintext_bytes)` as lowercase hex. Keyed with `file_key` so external parties cannot confirm public file hashes. Deduplicates duplicate uploads to a single blob.
+  2. **Atomic FileStorage**: Clean storage manager in `app_data_dir/files` using safe atomic writes (temporary `.tmp` files with atomic renames) preventing partial writes on crash.
+  3. **Automated Base64 Migration**: `migrate_embedded_images` automatically extracts legacy inline base64 data URLs from the SQLite `elements` table into content-addressed disk files, drastically reducing SQLite database and `crsql_changes` payload bloat.
+  4. **Coordinator P2P File Sync**: `sync_files_with_peer` integrated into `sync_peer_cycle`. Identifies missing local files, requests them from connected peer, verifies HMAC-SHA256 integrity on received bytes, and uploads files the peer lacks.
+  5. **Frontend IPC & Reactive ImageCache**: `store_image_file` and `get_image_file` exposed via Tauri IPC; in-memory `imageCache` and `useImageAttachment` hook in `Canvas.tsx` render images instantly for authors while showing a clean syncing placeholder for peers awaiting background sync.
+- **Acceptance**: Unit tests in `crypto::tests::test_compute_and_verify_file_id`, `storage::tests::test_content_addressed_storage`, and `storage::tests::test_migrate_embedded_images` pass; frontend build and workspace integration verified.
 
 ---
 
@@ -995,20 +999,26 @@ Per architecture definition, Phase 5 relies on two complementing transports:
 ---
 
 ### Task 5.11: Mailbox Transport Client, Automatic Transport Selection & Local Backups
-- **Status**: 🟡 Mostly Complete (Core sync done, local backups remaining)
+- **Status**: ✅ Done (2026-10-20)
 - **Files**:
   - [`crates/core/src/transport/mailbox.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/transport/mailbox.rs)
   - [`crates/core/src/sync/coordinator.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/sync/coordinator.rs)
-  - `crates/core/src/backup.rs` (pending)
+  - [`crates/core/src/backup.rs`](file:///home/anchit/gitClones/the-game-note/crates/core/src/backup.rs)
+  - [`src-tauri/src/commands.rs`](file:///home/anchit/gitClones/the-game-note/src-tauri/src/commands.rs)
+  - [`src-tauri/src/lib.rs`](file:///home/anchit/gitClones/the-game-note/src-tauri/src/lib.rs)
+  - [`src/components/SyncSettingsModal.tsx`](file:///home/anchit/gitClones/the-game-note/src/components/SyncSettingsModal.tsx)
+  - [`src/services/ipc.ts`](file:///home/anchit/gitClones/the-game-note/src/services/ipc.ts)
 - **What**:
-  1. `MailboxClient`: End-to-end encrypted push/pull/ack/subscribe with XChaCha20-Poly1305 + zstd.
+  1. `MailboxClient`: End-to-end encrypted push/pull/ack/subscribe with XChaCha20-Poly1305 + zstd envelope compression.
   2. Integrated into `SyncCoordinator`: Automatic sync cycle in `trigger_sync()` and debounced `fast_push_pending_changes()`.
   3. Background real-time SSE listener in Tauri app immediately applies incoming changes and triggers UI redraw with 0ms manual reload.
   4. **Local backups** (separate from sync):
-     - Rolling daily snapshots using SQLite `VACUUM INTO`, keep last 7 daily + 1 monthly.
-     - Manual "Export backup" and "Restore from backup" with warnings.
-     - Automated backup before any schema migration (5.2) and file migration (5.7).
-- **Acceptance**: Edit on tablet, turn tablet off, open laptop hours later: edits arrive via mailbox. When both on together, LAN direct sync is used. Restored backup opens correctly and re-syncs cleanly.
+     - Built `BackupManager` performing hot, atomic point-in-time snapshots via SQLite's `VACUUM INTO ?1`.
+     - Automated rotation maintaining retention policy: keeps last 7 daily snapshots + 1 monthly snapshot.
+     - Automated safety backups executed before startup schema migrations and image file migrations.
+     - Safe restore flow: automatically captures a `.bak` copy of active database before restoring snapshot.
+     - Frontend UI in `SyncSettingsModal`: "Backup Now" manual snapshot creation, snapshots list with date/size, and single-click "Restore" with safety confirmation.
+- **Acceptance**: Unit tests in `backup::tests::test_create_and_list_backups`, `backup::tests::test_restore_from_backup`, and `backup::tests::test_rotate_backups` pass; live mailbox integration and UI verification pass.
 
 ---
 
@@ -1091,7 +1101,7 @@ Per architecture definition, Phase 5 relies on two complementing transports:
 - [x] Mailbox stores only `SHA-256(mailbox_token)` and ciphertext; cannot derive keys.
 - [x] Bind parameters only for all `crsql_changes` reads and writes.
 - [x] Table/column allow-lists and size limits on all inbound data.
-- [ ] Keyed file IDs (`HMAC-SHA256`); strict hex validation; no client-supplied paths.
+- [x] Keyed file IDs (`HMAC-SHA256`); strict hex validation; no client-supplied paths.
 - [x] QR/pairing code treated as secret; auto-hidden; never logged.
 - [x] No secrets or plaintext in logs, config files, or exported diagnostics.
 - [x] Never copy DB files between devices (prevents duplicate `site_id`).

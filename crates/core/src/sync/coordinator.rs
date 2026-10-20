@@ -10,6 +10,7 @@ use crate::db::Database;
 use crate::error::{AppError, Result};
 use crate::sync::cursors::{self, CursorDirection};
 use crate::sync::engine::{sync_with_peer, SyncStats};
+use crate::storage::{is_valid_file_id, FileStorage};
 use crate::transport::client::HttpClient;
 use crate::transport::mailbox::{sync_with_mailbox, MailboxClient, MailboxSyncStats};
 use crate::transport::{Transport, TransportKind};
@@ -64,8 +65,8 @@ fn is_valid_site_id(id: &str) -> bool {
 }
 
 /// Orchestrates multi-transport synchronization across configured peers.
-/// Handles endpoint failover (LAN -> Tailscale), lifecycle pauses (Android backgrounding),
-/// debounced local writes, and reactive SSE triggers.
+/// Handles endpoint connection, lifecycle pauses (Android backgrounding),
+/// debounced local writes, reactive SSE triggers, and binary media sync.
 pub struct SyncCoordinator {
     db: Arc<Database>,
     peers: Arc<RwLock<Vec<PeerConfig>>>,
@@ -80,6 +81,7 @@ pub struct SyncCoordinator {
     mailbox_url: Arc<RwLock<Option<String>>>,
     mailbox_lock: Arc<Mutex<()>>,
     mailbox_runtime: Arc<RwLock<PeerRuntimeState>>,
+    storage: Arc<RwLock<Option<Arc<FileStorage>>>>,
 }
 
 impl SyncCoordinator {
@@ -99,6 +101,17 @@ impl SyncCoordinator {
         auth_token: Option<String>,
         mailbox_url: Option<String>,
     ) -> Self {
+        Self::with_options(db, peers, sync_keys, auth_token, mailbox_url, None)
+    }
+
+    pub fn with_options(
+        db: Arc<Database>,
+        peers: Vec<PeerConfig>,
+        sync_keys: Option<Arc<SyncKeys>>,
+        auth_token: Option<String>,
+        mailbox_url: Option<String>,
+        storage: Option<Arc<FileStorage>>,
+    ) -> Self {
         Self {
             db,
             peers: Arc::new(RwLock::new(peers)),
@@ -113,7 +126,17 @@ impl SyncCoordinator {
             mailbox_url: Arc::new(RwLock::new(mailbox_url)),
             mailbox_lock: Arc::new(Mutex::new(())),
             mailbox_runtime: Arc::new(RwLock::new(PeerRuntimeState::default())),
+            storage: Arc::new(RwLock::new(storage)),
         }
+    }
+
+    pub async fn set_storage(&self, storage: Option<Arc<FileStorage>>) {
+        let mut s = self.storage.write().await;
+        *s = storage;
+    }
+
+    pub async fn get_storage(&self) -> Option<Arc<FileStorage>> {
+        self.storage.read().await.clone()
     }
 
     pub async fn set_mailbox_url(&self, url: Option<String>) {
@@ -258,7 +281,7 @@ impl SyncCoordinator {
             }
         }
 
-        // 2. Sync with direct peers (LAN/Tailscale)
+        // 2. Sync with direct LAN peers
         for peer in peers {
             if let Some(target) = target_peer_id {
                 if peer.site_id != target {
@@ -313,7 +336,7 @@ impl SyncCoordinator {
                 .and_then(|r| r.last_working_endpoint.clone())
         };
 
-        // Order endpoints: last working first, then LAN, then Tailscale
+        // Order endpoints: last working first, then remaining LAN endpoints
         let mut candidate_endpoints = Vec::new();
         if let Some(ref lw) = last_working {
             if let Some(ep) = peer.endpoints.iter().find(|e| &e.url == lw) {
@@ -321,23 +344,7 @@ impl SyncCoordinator {
             }
         }
 
-        // Add remaining LAN endpoints
-        for ep in &peer.endpoints {
-            if ep.kind == TransportKind::Lan && !candidate_endpoints.iter().any(|c| c.url == ep.url) {
-                candidate_endpoints.push(ep.clone());
-            }
-        }
-
-        // Add remaining Tailscale endpoints
-        for ep in &peer.endpoints {
-            if ep.kind == TransportKind::Tailscale
-                && !candidate_endpoints.iter().any(|c| c.url == ep.url)
-            {
-                candidate_endpoints.push(ep.clone());
-            }
-        }
-
-        // Add any other endpoints
+        // Add remaining endpoints
         for ep in &peer.endpoints {
             if !candidate_endpoints.iter().any(|c| c.url == ep.url) {
                 candidate_endpoints.push(ep.clone());
@@ -457,6 +464,9 @@ impl SyncCoordinator {
                     }
                 }
 
+                // Sync binary attachments (images / media files) with peer
+                let _ = self.sync_files_with_peer(&client).await;
+
                 Ok((actual_site_id, stats))
             }
             Err(e) => {
@@ -464,6 +474,120 @@ impl SyncCoordinator {
                 Err(e)
             }
         }
+    }
+
+    /// Automatically synchronizes binary image and media attachments with a connected peer.
+    /// Scans elements for referenced `file_id`s, requests missing ones, verifies HMAC, and uploads
+    /// files that the peer lacks.
+    pub async fn sync_files_with_peer(&self, client: &HttpClient) -> Result<usize> {
+        let storage = match self.get_storage().await {
+            Some(s) => s,
+            None => return Ok(0),
+        };
+        let sync_keys = self.sync_keys.read().await.clone();
+
+        // 1. Scan all file_ids referenced in the local database
+        let local_referenced_ids = {
+            let conn = self.db.conn();
+            let mut stmt = match conn.prepare(
+                "SELECT content FROM elements WHERE content LIKE '%\"file_id\"%'"
+            ) {
+                Ok(s) => s,
+                Err(_) => return Ok(0),
+            };
+            let rows = match stmt.query_map([], |row| row.get::<_, String>(0)) {
+                Ok(r) => r,
+                Err(_) => return Ok(0),
+            };
+            let mut ids = std::collections::HashSet::new();
+            for r in rows {
+                if let Ok(c) = r {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&c) {
+                        if let Some(fid) = json.get("file_id").and_then(|v| v.as_str()) {
+                            if is_valid_file_id(fid) {
+                                ids.insert(fid.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            ids
+        };
+
+        // 2. Filter for files that we are missing locally
+        let missing_locally: Vec<String> = local_referenced_ids
+            .into_iter()
+            .filter(|fid| !storage.has_file(fid))
+            .collect();
+
+        let mut downloaded_count = 0;
+        if !missing_locally.is_empty() {
+            // Ask peer which of these missing files it has
+            if let Ok(peer_missing) = client.missing_files(&missing_locally).await {
+                let peer_missing_set: std::collections::HashSet<_> = peer_missing.into_iter().collect();
+                let available_on_peer: Vec<String> = missing_locally
+                    .into_iter()
+                    .filter(|id| !peer_missing_set.contains(id))
+                    .collect();
+
+                // Download up to 10 files per sync cycle
+                for fid in available_on_peer.into_iter().take(10) {
+                    use futures_util::StreamExt;
+                    if let Ok(mut stream) = client.get_file(&fid, None).await {
+                        let mut file_bytes = Vec::new();
+                        let mut ok = true;
+                        while let Some(chunk_res) = stream.next().await {
+                            match chunk_res {
+                                Ok(chunk) => file_bytes.extend_from_slice(&chunk),
+                                Err(_) => {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if ok && !file_bytes.is_empty() {
+                            let is_valid = if let Some(ref keys) = sync_keys {
+                                crate::crypto::verify_file_id(&keys.file_key, &file_bytes, &fid)
+                            } else {
+                                true
+                            };
+
+                            if is_valid {
+                                if storage.store_file(&fid, &file_bytes).is_ok() {
+                                    downloaded_count += 1;
+                                }
+                            } else {
+                                log::warn!("File integrity verification failed for file {}", fid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Upload files that peer is missing
+        if let Ok(local_stored_ids) = storage.list_content_addressed_files() {
+            if !local_stored_ids.is_empty() {
+                let sample: Vec<String> = local_stored_ids.into_iter().take(20).collect();
+                if let Ok(peer_missing) = client.missing_files(&sample).await {
+                    for fid in peer_missing.into_iter().take(5) {
+                        if let Ok(bytes) = storage.read_file(&fid) {
+                            let _ = client.put_file(&fid, 0, bytes::Bytes::from(bytes)).await;
+                        }
+                    }
+                }
+            }
+        }
+
+        if downloaded_count > 0 {
+            let cb = self.on_change_applied.read().await.clone();
+            if let Some(cb) = cb {
+                cb();
+            }
+        }
+
+        Ok(downloaded_count)
     }
 
     async fn record_peer_error(&self, peer_id: &str, error: &str) {
@@ -550,9 +674,9 @@ impl SyncCoordinator {
                     }
                     let transport = if is_active {
                         if active_transport.is_none() {
-                            active_transport = Some(TransportKind::Tailscale);
+                            active_transport = Some(TransportKind::Lan);
                         }
-                        Some(TransportKind::Tailscale)
+                        Some(TransportKind::Lan)
                     } else {
                         None
                     };

@@ -294,9 +294,6 @@ pub async fn start_pairing(
     let config = SyncConfig::load_or_default(&sync_state.app_data_dir);
     let mut hub_hints = Vec::new();
     if config.server.enabled {
-        if let Some(ts_ip) = get_tailscale_ip() {
-            hub_hints.push(format!("http://{}:{}", ts_ip, config.server.port));
-        }
         if let Some(ip) = get_local_outbound_ip() {
             if !ip.is_loopback() {
                 hub_hints.push(format!("http://{}:{}", ip, config.server.port));
@@ -329,20 +326,6 @@ pub async fn start_pairing(
         recovery_code,
         hub_hints,
     })
-}
-
-fn get_tailscale_ip() -> Option<String> {
-    let output = std::process::Command::new("tailscale")
-        .args(["ip", "-4"])
-        .output()
-        .ok()?;
-    if output.status.success() {
-        let ip_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !ip_str.is_empty() {
-            return Some(ip_str);
-        }
-    }
-    None
 }
 
 fn get_local_outbound_ip() -> Option<std::net::IpAddr> {
@@ -588,4 +571,134 @@ pub async fn sync_clear_inactive_peers(
 ) -> Result<(), String> {
     sync_state.coordinator.clear_inactive_peers().await.map_err(|e| e.to_string())
 }
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct StoredImageInfo {
+    pub file_id: String,
+    pub mime_type: String,
+    pub size_bytes: usize,
+}
+
+#[tauri::command]
+pub async fn store_image_file(
+    sync_state: State<'_, AppSyncState>,
+    base64_data: String,
+) -> Result<StoredImageInfo, String> {
+    use base64::prelude::*;
+    let sync_keys = sync_state.sync_keys.read().await.clone();
+    let file_key = match sync_keys {
+        Some(ref k) => k.file_key,
+        None => [0u8; 32],
+    };
+
+    let (mime_type, raw_bytes) = if let Some(comma_pos) = base64_data.find(',') {
+        let header = &base64_data[..comma_pos];
+        let payload = &base64_data[comma_pos + 1..];
+        let mime = header
+            .strip_prefix("data:")
+            .and_then(|h| h.split(';').next())
+            .unwrap_or("image/png")
+            .to_string();
+        let bytes = BASE64_STANDARD
+            .decode(payload.trim())
+            .map_err(|e| format!("Invalid base64 payload: {}", e))?;
+        (mime, bytes)
+    } else {
+        let bytes = BASE64_STANDARD
+            .decode(base64_data.trim())
+            .map_err(|e| format!("Invalid base64 payload: {}", e))?;
+        ("image/png".to_string(), bytes)
+    };
+
+    let file_id = milanote_core::compute_file_id(&file_key, &raw_bytes);
+    sync_state
+        .storage
+        .store_file(&file_id, &raw_bytes)
+        .map_err(|e| e.to_string())?;
+
+    let size_bytes = raw_bytes.len();
+    Ok(StoredImageInfo {
+        file_id,
+        mime_type,
+        size_bytes,
+    })
+}
+
+#[tauri::command]
+pub async fn get_image_file(
+    sync_state: State<'_, AppSyncState>,
+    file_id: String,
+) -> Result<String, String> {
+    use base64::prelude::*;
+    if !milanote_core::is_valid_file_id(&file_id) {
+        return Err(format!("Invalid file ID: {}", file_id));
+    }
+    let bytes = sync_state
+        .storage
+        .read_file(&file_id)
+        .map_err(|e| e.to_string())?;
+
+    let mime = if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if bytes.starts_with(b"GIF8") {
+        "image/gif"
+    } else if bytes.starts_with(b"RIFF") && bytes.len() > 12 && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") {
+        "image/svg+xml"
+    } else {
+        "image/png"
+    };
+
+    let b64 = BASE64_STANDARD.encode(&bytes);
+    Ok(format!("data:{};base64,{}", mime, b64))
+}
+
+#[tauri::command]
+pub async fn create_backup(
+    sync_state: State<'_, AppSyncState>,
+    label: Option<String>,
+) -> Result<milanote_core::BackupInfo, String> {
+    let backup_dir = sync_state.app_data_dir.join("backups");
+    let label_str = label.unwrap_or_else(|| "manual".to_string());
+    let conn = sync_state.db.conn();
+    let info = milanote_core::BackupManager::create_backup(&conn, &backup_dir, &label_str)
+        .map_err(|e| e.to_string())?;
+    let _ = milanote_core::BackupManager::rotate_backups(&backup_dir, 7, 1);
+    Ok(info)
+}
+
+#[tauri::command]
+pub async fn list_backups(
+    sync_state: State<'_, AppSyncState>,
+) -> Result<Vec<milanote_core::BackupInfo>, String> {
+    let backup_dir = sync_state.app_data_dir.join("backups");
+    milanote_core::BackupManager::list_backups(&backup_dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn restore_backup(
+    sync_state: State<'_, AppSyncState>,
+    filename: String,
+) -> Result<String, String> {
+    let backup_dir = sync_state.app_data_dir.join("backups");
+    let backup_path = backup_dir.join(&filename);
+    let active_db_path = sync_state.app_data_dir.join("milanote.db");
+
+    let safety_path = milanote_core::BackupManager::restore_from_backup(&backup_path, &active_db_path)
+        .map_err(|e| e.to_string())?;
+    sync_state.notify_db_changed();
+    Ok(safety_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn export_backup(
+    sync_state: State<'_, AppSyncState>,
+    target_path: String,
+) -> Result<(), String> {
+    let conn = sync_state.db.conn();
+    milanote_core::BackupManager::export_backup_to_path(&conn, std::path::Path::new(&target_path))
+        .map_err(|e| e.to_string())
+}
+
 

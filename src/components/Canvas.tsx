@@ -32,8 +32,11 @@ import {
   Lock,
   Unlock,
   X,
-  CheckSquare
+  CheckSquare,
+  RefreshCw,
+  AlertTriangle,
 } from 'lucide-react';
+import { useImageAttachment, imageCache } from '../services/imageCache';
 
 const isLightColor = (hex?: string): boolean => {
   if (!hex || hex === 'transparent' || !hex.startsWith('#')) return false;
@@ -423,6 +426,228 @@ const ImageCaptionEditorComponent: React.FC<ImageCaptionEditorComponentProps> = 
         flushChanges();
       }}
     />
+  );
+};
+
+interface ImageCardProps {
+  el: Element;
+  inColumn: boolean;
+  isSelected: boolean;
+  isEditing: boolean;
+  onSetEditingElement: (id: string | null) => void;
+  onSelectElement: (id: string | null) => void;
+  onUploadImageForElement?: (id: string, dataUrl: string) => void;
+  onUpdateElementPositions: (updates: ElementPositionUpdate[]) => void;
+  onContentChange: (id: string, content: Record<string, any>) => void;
+  dragRef: React.MutableRefObject<any>;
+}
+
+const ImageCard: React.FC<ImageCardProps> = ({
+  el,
+  inColumn,
+  isSelected,
+  isEditing,
+  onSetEditingElement,
+  onSelectElement,
+  onUploadImageForElement,
+  onUpdateElementPositions,
+  onContentChange,
+  dragRef,
+}) => {
+  const { url: imgUrl, loading: isSyncing, error: isError } = useImageAttachment(el.content?.file_id, el.content?.url);
+  const hasImage = Boolean(imgUrl && imgUrl.trim().length > 0 && !imgUrl.includes('unsplash.com/photo-1618005182384-a83a8bd57fbe'));
+  const hasFileId = Boolean(el.content?.file_id);
+
+  return (
+    <div
+      className="column-image-card"
+      style={{ background: Boolean(el.content?.show_caption) ? 'rgb(51, 51, 51)' : 'transparent', borderRadius: 0, overflow: 'hidden', position: 'relative' }}
+      onDoubleClick={(e) => { e.stopPropagation(); onSetEditingElement(el.id); }}
+    >
+      {!hasImage && (isSyncing || (hasFileId && !isError)) ? (
+        <div
+          className="image-card-syncing-placeholder"
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            minHeight: '160px',
+            background: 'rgba(255, 255, 255, 0.02)',
+            border: '1px dashed rgba(255, 255, 255, 0.15)',
+            borderRadius: 0,
+            padding: '24px 16px',
+            color: '#94a3b8',
+            gap: '8px',
+            userSelect: 'none',
+          }}
+        >
+          <RefreshCw size={22} className="spin" style={{ color: '#38bdf8' }} />
+          <span style={{ fontSize: '13px', fontWeight: 600, color: '#e2e8f0' }}>Syncing image attachment...</span>
+          <span style={{ fontSize: '11px', color: '#64748b' }}>Transferring via end-to-end encrypted sync</span>
+        </div>
+      ) : !hasImage && hasFileId && isError ? (
+        <div
+          className="image-card-error-placeholder"
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            minHeight: '160px',
+            background: 'rgba(239, 68, 68, 0.04)',
+            border: '1px dashed rgba(239, 68, 68, 0.25)',
+            borderRadius: 0,
+            padding: '20px 16px',
+            color: '#f87171',
+            gap: '8px',
+          }}
+        >
+          <AlertTriangle size={22} />
+          <span style={{ fontSize: '12px', fontWeight: 600 }}>Image attachment missing</span>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              if (el.content?.file_id) {
+                imageCache.load(el.content.file_id).catch(() => {});
+              }
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            onTouchStart={(e) => e.stopPropagation()}
+            style={{
+              background: 'rgba(255, 255, 255, 0.08)',
+              border: '1px solid rgba(255, 255, 255, 0.2)',
+              borderRadius: 6,
+              padding: '6px 14px',
+              minHeight: '36px',
+              color: '#cbd5e1',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              touchAction: 'manipulation',
+              userSelect: 'none',
+            }}
+          >
+            Retry Sync
+          </button>
+        </div>
+      ) : !hasImage ? (
+        <div
+          className="image-card-empty-placeholder"
+          onPointerDown={(e) => e.stopPropagation()}
+          onTouchStart={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            const input = document.getElementById(`image-file-input-${el.id}`) as HTMLInputElement | null;
+            input?.click();
+          }}
+        >
+          <input
+            id={`image-file-input-${el.id}`}
+            type="file"
+            accept="image/*"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) {
+                const reader = new FileReader();
+                reader.onload = () => {
+                  if (typeof reader.result === 'string') {
+                    onUploadImageForElement?.(el.id, reader.result);
+                  }
+                };
+                reader.readAsDataURL(file);
+              }
+            }}
+          />
+          <div className="image-placeholder-icon-box">
+            <ImageIcon size={32} strokeWidth={1.5} color="#8a90a0" />
+          </div>
+          <span className="image-placeholder-title">Upload an image</span>
+          <span className="image-placeholder-sub">Tap or click to browse</span>
+        </div>
+      ) : (
+        <div className="image-photo-wrap" style={(!inColumn && Boolean(el.content?.show_caption) && ((dragRef.current?.isResize && dragRef.current?.elementId === el.id && dragRef.current?.liveHeight) ? dragRef.current.liveHeight : el.height)) ? { height: `${(dragRef.current?.isResize && dragRef.current?.elementId === el.id && dragRef.current?.liveHeight) ? dragRef.current.liveHeight : el.height}px`, borderRadius: 0, position: 'relative' } : { borderRadius: 0, position: 'relative' }}>
+          <img
+            src={imgUrl}
+            alt="Art"
+            style={{ borderRadius: 0 }}
+            onLoad={(e) => {
+              const img = e.currentTarget;
+              if (!inColumn && img.naturalWidth && img.naturalHeight) {
+                const naturalAspect = img.naturalWidth / img.naturalHeight;
+                const currentWidth = el.width || 340;
+                const currentHeight = el.height || 220;
+                const currentAspect = currentWidth / currentHeight;
+                if (Math.abs(naturalAspect - currentAspect) > 0.02) {
+                  const optimalHeight = Math.max(40, Math.round(currentWidth / naturalAspect));
+                  onUpdateElementPositions([{ id: el.id, x: el.x, y: el.y, width: currentWidth, height: optimalHeight, z_index: el.z_index || 10 }]);
+                }
+              }
+            }}
+          />
+          {isSelected && (
+            <button
+              type="button"
+              className="image-card-replace-overlay-btn"
+              onClick={(e) => {
+                e.stopPropagation();
+                const input = document.getElementById(`image-file-input-${el.id}`) as HTMLInputElement | null;
+                input?.click();
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+              onTouchStart={(e) => e.stopPropagation()}
+              title="Replace image"
+            >
+              <input
+                id={`image-file-input-${el.id}`}
+                type="file"
+                accept="image/*"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  if (file) {
+                    const reader = new FileReader();
+                    reader.onload = () => {
+                      if (typeof reader.result === 'string') {
+                        onUploadImageForElement?.(el.id, reader.result);
+                      }
+                    };
+                    reader.readAsDataURL(file);
+                  }
+                }}
+              />
+              <span>Replace</span>
+            </button>
+          )}
+        </div>
+      )}
+      {Boolean(el.content?.show_caption) && (
+        <div 
+          style={{ background: 'rgb(51, 51, 51)', padding: '8px 12px', width: '100%', minHeight: '56px', display: 'flex', flexDirection: 'column', justifyContent: 'center', cursor: isEditing ? 'text' : 'pointer' }} 
+          onMouseDown={(e) => {
+            e.stopPropagation();
+            if (isSelected) onSelectElement(el.id);
+          }}
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            onSetEditingElement(el.id);
+          }}
+          onClick={(e) => {
+            e.stopPropagation();
+            if (!isEditing) onSetEditingElement(el.id);
+          }}
+        >
+          <ImageCaptionEditorComponent
+            id={el.id}
+            isEditing={isEditing}
+            caption={el.content.caption || ''}
+            onContentChange={onContentChange}
+            elContent={el.content}
+          />
+        </div>
+      )}
+    </div>
   );
 };
 
@@ -4278,129 +4503,19 @@ export const Canvas: React.FC<CanvasProps> = ({
 
     if (el.element_type === 'image') {
       const isSelected = selectedElementId === el.id || selectedIds.includes(el.id);
-      const hasImage = Boolean(el.content?.url && el.content.url.trim().length > 0 && !el.content.url.includes('unsplash.com/photo-1618005182384-a83a8bd57fbe'));
-
       return (
-        <div
-          className="column-image-card"
-          style={{ background: Boolean(el.content?.show_caption) ? 'rgb(51, 51, 51)' : 'transparent', borderRadius: 0, overflow: 'hidden', position: 'relative' }}
-          onDoubleClick={(e) => { e.stopPropagation(); onSetEditingElement(el.id); }}
-        >
-          {!hasImage ? (
-            <div
-              className="image-card-empty-placeholder"
-              onClick={(e) => {
-                e.stopPropagation();
-                const input = document.getElementById(`image-file-input-${el.id}`) as HTMLInputElement | null;
-                input?.click();
-              }}
-            >
-              <input
-                id={`image-file-input-${el.id}`}
-                type="file"
-                accept="image/*"
-                style={{ display: 'none' }}
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) {
-                    const reader = new FileReader();
-                    reader.onload = () => {
-                      if (typeof reader.result === 'string') {
-                        onUploadImageForElement?.(el.id, reader.result);
-                      }
-                    };
-                    reader.readAsDataURL(file);
-                  }
-                }}
-              />
-              <div className="image-placeholder-icon-box">
-                <ImageIcon size={32} strokeWidth={1.5} color="#8a90a0" />
-              </div>
-              <span className="image-placeholder-title">Upload an image</span>
-              <span className="image-placeholder-sub">Tap or click to browse</span>
-            </div>
-          ) : (
-            <div className="image-photo-wrap" style={(!inColumn && Boolean(el.content?.show_caption) && ((dragRef.current?.isResize && dragRef.current?.elementId === el.id && dragRef.current?.liveHeight) ? dragRef.current.liveHeight : el.height)) ? { height: `${(dragRef.current?.isResize && dragRef.current?.elementId === el.id && dragRef.current?.liveHeight) ? dragRef.current.liveHeight : el.height}px`, borderRadius: 0, position: 'relative' } : { borderRadius: 0, position: 'relative' }}>
-              <img
-                src={el.content.url}
-                alt="Art"
-                style={{ borderRadius: 0 }}
-                onLoad={(e) => {
-                  const img = e.currentTarget;
-                  if (!inColumn && img.naturalWidth && img.naturalHeight) {
-                    const naturalAspect = img.naturalWidth / img.naturalHeight;
-                    const currentWidth = el.width || 340;
-                    const currentHeight = el.height || 220;
-                    const currentAspect = currentWidth / currentHeight;
-                    if (Math.abs(naturalAspect - currentAspect) > 0.02) {
-                      const optimalHeight = Math.max(40, Math.round(currentWidth / naturalAspect));
-                      onUpdateElementPositions([{ id: el.id, x: el.x, y: el.y, width: currentWidth, height: optimalHeight, z_index: el.z_index || 10 }]);
-                    }
-                  }
-                }}
-              />
-              {isSelected && (
-                <button
-                  type="button"
-                  className="image-card-replace-overlay-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    const input = document.getElementById(`image-file-input-${el.id}`) as HTMLInputElement | null;
-                    input?.click();
-                  }}
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onTouchStart={(e) => e.stopPropagation()}
-                  title="Replace image"
-                >
-                  <input
-                    id={`image-file-input-${el.id}`}
-                    type="file"
-                    accept="image/*"
-                    style={{ display: 'none' }}
-                    onChange={(e) => {
-                      const file = e.target.files?.[0];
-                      if (file) {
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                          if (typeof reader.result === 'string') {
-                            onUploadImageForElement?.(el.id, reader.result);
-                          }
-                        };
-                        reader.readAsDataURL(file);
-                      }
-                    }}
-                  />
-                  <span>Replace</span>
-                </button>
-              )}
-            </div>
-          )}
-          {Boolean(el.content?.show_caption) && (
-            <div 
-              style={{ background: 'rgb(51, 51, 51)', padding: '8px 12px', width: '100%', minHeight: '56px', display: 'flex', flexDirection: 'column', justifyContent: 'center', cursor: isEditing ? 'text' : 'pointer' }} 
-              onMouseDown={(e) => {
-                e.stopPropagation();
-                if (selectedElementId !== el.id) onSelectElement(el.id);
-              }}
-              onDoubleClick={(e) => {
-                e.stopPropagation();
-                onSetEditingElement(el.id);
-              }}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (!isEditing) onSetEditingElement(el.id);
-              }}
-            >
-              <ImageCaptionEditorComponent
-                id={el.id}
-                isEditing={isEditing}
-                caption={el.content.caption || ''}
-                onContentChange={onContentChange}
-                elContent={el.content}
-              />
-            </div>
-          )}
-        </div>
+        <ImageCard
+          el={el}
+          inColumn={inColumn}
+          isSelected={isSelected}
+          isEditing={isEditing}
+          onSetEditingElement={onSetEditingElement}
+          onSelectElement={onSelectElement}
+          onUploadImageForElement={onUploadImageForElement}
+          onUpdateElementPositions={onUpdateElementPositions}
+          onContentChange={onContentChange}
+          dragRef={dragRef}
+        />
       );
     }
 

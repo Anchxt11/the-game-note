@@ -9,13 +9,16 @@ pub mod sync;
 pub mod transport;
 pub mod crypto;
 pub mod pairing;
+pub mod backup;
 
+pub use backup::{BackupInfo, BackupManager};
 pub use error::{AppError, Result};
 pub use models::*;
 pub use db::Database;
-pub use storage::FileStorage;
+pub use storage::{is_valid_file_id, migrate_embedded_images, FileStorage};
 pub use crypto::{
-    compute_aad, decrypt_payload, encrypt_payload, verify_token_constant_time, SyncKeys,
+    compute_aad, compute_file_id, decrypt_payload, encrypt_payload, verify_file_id,
+    verify_token_constant_time, SyncKeys,
 };
 pub use pairing::{
     decode_pairing_code, encode_pairing_code, export_recovery_code, generate_pairing_qr_svg,
