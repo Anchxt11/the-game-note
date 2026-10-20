@@ -1,175 +1,197 @@
 # The Game Note — Infinite Canvas Board App
 
-A **native Linux desktop alternative to Milanote**, built with Tauri, Rust, and React. No subscriptions, no cloud sync limits, no card limits. Your data lives in a local SQLite database on your machine.
+A **native Linux desktop and Android alternative to Milanote**, built with Tauri v2, Rust, and React. 
+
+**Local-first, private, and fast.** No subscriptions, no telemetry, no cloud lock-in, and no arbitrary card limits. Your data lives in a local SQLite database on your machine with peer-to-peer and encrypted cloud relay synchronization.
+
+---
+
+## 📦 Downloads & Installation
+
+Pre-built binaries are available on the [GitHub Releases](https://github.com/Anchxt11/the-game-note/releases) page:
+
+### 1. Pop!_OS / Ubuntu / Debian (`.deb`)
+Download `GameNote_<version>_amd64.deb` and install via terminal or Eddy:
+```bash
+sudo dpkg -i GameNote_*_amd64.deb
+# or install via apt to auto-resolve dependencies:
+sudo apt install ./GameNote_*_amd64.deb
+```
+
+### 2. CachyOS / Arch Linux / Universal Linux (`.AppImage`)
+Download `GameNote_<version>_amd64.AppImage`, make it executable, and run:
+```bash
+chmod +x GameNote_*_amd64.AppImage
+./GameNote_*_amd64.AppImage
+```
+*(Tip: You can also manage it with [AppImageLauncher](https://github.com/TheAssassin/AppImageLauncher) for desktop launcher integration).*
+
+### 3. Android (`.apk`)
+Download `GameNote-<version>-universal.apk` directly to your phone:
+1. Open the downloaded `.apk` file.
+2. If prompted, allow **"Install unknown apps"** for your browser or file manager.
+3. Tap **Install**.
+
+---
+
+## 🔄 Device Pairing & Real-Time Sync
+
+GameNote features an encrypted **Zero-Knowledge Sync Engine** powered by `cr-sqlite` (Conflict-free Replicated Relations). Sync works across Linux desktops and Android devices seamlessly.
+
+### How Device Pairing Works
+GameNote uses a **Shared Vault / Cryptographic Secret** model:
+- **Same Pairing Secret** = Devices belong to the same workspace and share all boards.
+- **Different Pairing Secrets** = Devices are completely private and isolated from each other.
+
+---
+
+### Sync Modes
+
+#### Mode 1: Local Wi-Fi (P2P LAN) — *Zero Cloud, 100% Free*
+If your devices (e.g. your laptop and your Android phone) are connected to the same Wi-Fi network:
+1. On your computer: Open **Settings $\rightarrow$ Device Pairing & Sync $\rightarrow$ Start Pairing**.
+2. On your phone: Tap the **Sync & Pairing** icon in the bottom navigation bar.
+3. Scan the QR code displayed on your screen (or copy/paste the Pairing Code).
+4. Tap **Pair Device**.
+> **That's it!** GameNote uses mDNS auto-discovery on your local network (ports 19841/19842) to sync peer-to-peer. It requires **no internet connection**, consumes **zero cloud quota**, and transfers data directly device-to-device.
+
+---
+
+#### Mode 2: Remote Collaboration Across Different Networks (Cloudflare Mailbox)
+When devices are on different networks (e.g. collaborating with a team member in another city or accessing your boards on cellular data):
+
+1. **Host an Invite**:
+   - Turn **Cloud Relay** ON in **Settings $\rightarrow$ Sync Settings**.
+   - Click **Start Pairing** and send the generated Pairing Code to your collaborator.
+2. **Collaborator Joins**:
+   - The collaborator opens GameNote, opens **Device Pairing & Sync**, and pastes the code.
+   - Their app automatically connects to the same encrypted channel and pulls down the workspace boards.
+3. **End-to-End Encryption (E2EE)**:
+   - All note texts, element positions, and images are encrypted with **XChaCha20-Poly1305** before leaving your device. The cloud relay only routes ciphertext blobs and cannot read your notes.
+
+---
+
+#### 🚀 Deploy Your Own Free Cloud Relay (Optional / Self-Hosting)
+By default, GameNote operates 100% offline and locally so random installs never consume third-party servers. If you want your own personal 24/7 cloud relay for remote sync, you can deploy your own Cloudflare Worker in 1 minute for **$0/month** (Cloudflare free tier includes 100,000 requests/day):
+
+```bash
+# 1. Clone the repo and enter the mailbox directory
+git clone https://github.com/Anchxt11/the-game-note.git
+cd the-game-note/mailbox
+
+# 2. Install dependencies & authenticate with Cloudflare
+npm install
+npx wrangler login
+
+# 3. Deploy to your Cloudflare account
+npx wrangler deploy
+```
+
+Wrangler will output your unique endpoint URL:
+```text
+Deployed gamenote-mailbox triggers:
+  https://gamenote-mailbox.<your-subdomain>.workers.dev
+```
+
+Copy that URL into GameNote: **Settings $\rightarrow$ Cloud Relay Endpoint URL $\rightarrow$ Enable Cloud Relay**.
 
 ---
 
 ## ✨ Features
 
 ### Canvas Elements
-- **Notes** — Rich text notes with full text styling (Large Heading, Normal Heading, Normal Text, Small Text, Code Block, Callout, Quote Block)
-- **Task Lists (Checklists)** — Draggable, reorderable to-do items with drag-to-detach and merge
-- **Columns** — Organizer lanes that cards can snap into
-- **Nested Boards** — Full sub-board navigation with breadcrumbs
-- **Link Cards** — Visual web bookmark cards (with live YouTube and Steam thumbnail fetching)
-- **Image Cards** — Upload local images or pick from curated Unsplash stock library
-- **Comment Cards** — Pinnable annotation cards (pin to elements or float freely)
-- **Lines / Connectors** — Annotated directional arrows between elements
-- **Tables** — Editable multi-row/column data tables with cell action sidebar
+- **Rich Text Notes** — Full heading levels, body text, callout cards, code blocks, quote blocks with decorators.
+- **Checklists & Task Lists** — Drag-and-drop reordering, interactive check states, item detach and merge.
+- **Organizer Columns** — Flexible vertical layout lanes that cards snap into.
+- **Nested Sub-Boards** — Infinite depth board hierarchies with full breadcrumb navigation.
+- **Visual Link Cards** — Rich OpenGraph visual bookmark previews (YouTube, Steam, GitHub, blogs).
+- **Images & Media** — Local file upload or curated Unsplash stock library search.
+- **Annotated Connectors** — Directional arrow lines and links between canvas cards.
+- **Data Tables** — Editable multi-column tables with dynamic row and column manipulation.
+- **Comments & Annotations** — Floating or pinned annotation cards.
 
-### Canvas Experience
-- **Infinite Pan & Zoom** — Smooth trackpad and mouse-wheel canvas navigation
-- **Multi-Select** — Click-drag lasso selection or Shift+click for multi-select
-- **Drag & Drop** — Drag tools from toolbar to canvas to create elements; drag elements between boards and the breadcrumb trail
-- **Undo / Redo** — Full 30-step undo/redo stack (Ctrl+Z / Ctrl+Shift+Z)
-- **Copy, Cut, Paste** — Full clipboard support with offset paste
-- **Context Menu** — Right-click menu with duplicate, recolor, move to board, delete, etc.
-- **Board Background** — Per-board background color picker
-- **Unsorted Drawer** — Slide-out tray for cards without a canvas position
-
-### Sidebar & Navigation
-- **Board Tree Sidebar** — Collapsible sidebar with nested board hierarchy view
-- **Full-Text Search** — SQLite-powered FTS search across boards, notes, and task items
-- **Breadcrumb Navigation** — Top bar breadcrumb for sub-board navigation with drag-to-move
-- **Top Bar** — Undo/Redo buttons, view menu (zoom controls), presentation mode toggle
-
-### Text Styling (Notes)
-- Large Heading, Normal Heading, Normal Text, Small Text
-- Code Block (monospace styling)
-- Callout (highlighted panel)
-- Quote Block (with non-removable `"` decorators)
-- Text Color palette
-- Bold, Italic, Underline
-
-### Card Theming
-- 6 color tints per card: Default Gray, Warm Gold, Muted Crimson, Forest Green, Deep Sky Blue, Royal Violet
+### Interaction & Experience
+- **Infinite Canvas** — Smooth 60fps pan and pinch/wheel zoom.
+- **Multi-Select & Lasso** — Box select multiple items to move, recolor, or delete in bulk.
+- **Undo / Redo** — Full 30-step historical undo/redo stack (`Ctrl+Z` / `Ctrl+Shift+Z`).
+- **Clipboard** — System-wide copy, cut, and duplicate (`Ctrl+C`, `Ctrl+X`, `Ctrl+V`, `Ctrl+D`).
+- **Unsorted Drawer** — Slide-out tray holding newly dropped or unpositioned items.
+- **Search** — Instant SQLite full-text search across all nested boards, notes, and task items.
 
 ---
 
-## 🏗️ Architecture
+## 💾 Data Storage & Automated Backups
 
-```
-the-game-note/
-├── src/                        # React/TypeScript frontend
-│   ├── App.tsx                 # Root component — state, keyboard shortcuts, board navigation
-│   ├── types.ts                # Shared TypeScript type definitions
-│   ├── index.css               # Global styles, design tokens, all component CSS
-│   ├── components/
-│   │   ├── Canvas.tsx          # Infinite canvas engine (~3600 lines) — pan, zoom, drag, render
-│   │   ├── Toolbar.tsx         # Left-side tool palette with drag-preview ghost system
-│   │   ├── TextEditSubSidebar.tsx # Rich text formatting sidebar (text styles, color)
-│   │   ├── TaskListCard.tsx    # Checklist element component with drag-reorder
-│   │   ├── CommentCard.tsx     # Pinnable annotation card
-│   │   ├── Sidebar.tsx         # Board tree sidebar with FTS search
-│   │   ├── TopBar.tsx          # Top navigation bar
-│   │   ├── SearchModal.tsx     # Global search modal
-│   │   ├── ContextMenu.tsx     # Right-click context menu
-│   │   ├── UnsortedDrawer.tsx  # Unsorted elements slide-out tray
-│   │   ├── UnsortedTray.tsx    # Tray icon/toggle button
-│   │   └── *ActionSidebar.tsx  # Per-element-type right-side action panels
-│   └── services/
-│       └── ipc.ts              # Tauri IPC bridge — all DB calls go through here
-│
-├── src-tauri/                  # Tauri host (Rust)
-│   └── src/
-│       ├── main.rs             # App bootstrap, DB init, seed check, command registration
-│       └── commands.rs         # All #[tauri::command] endpoints exposed to frontend
-│
-└── crates/
-    └── core/                   # milanote-core Rust library
-        └── src/
-            ├── db.rs           # All rusqlite database operations (CRUD, batch, search)
-            ├── models.rs       # Rust structs: Board, Element, TaskListItem, Connector, etc.
-            ├── error.rs        # Custom AppError type with thiserror
-            ├── opengraph.rs    # OpenGraph scraping for link card previews
-            ├── seed.rs         # Demo data seeder (runs once on first launch)
-            └── storage.rs      # Local filesystem storage for uploaded images
+All data, media files, and cryptographic keys are stored locally on your machine in the standard platform directory:
+```text
+~/.local/share/com.anchit.gameNote/
 ```
 
-### Data Flow
-```
-React Component
-    ↓  ipcService.someMethod()
-src/services/ipc.ts
-    ↓  invoke('command_name', { ...args })
-Tauri IPC Bridge
-    ↓  #[tauri::command] fn in commands.rs
-milanote-core Database struct
-    ↓  rusqlite
-~/.local/share/com.antigravity.milanote/milanote.db
-```
+- `milanote.db` — Main SQLite database (contains all boards, notes, cards, and CRDT change history).
+- `files/` — Content-addressed image and media storage.
+- `backups/` — Automated rolling daily backups (rotates last 7 days of snapshots).
+- `sync_secret.key` — Your private 32-byte master encryption key.
+
+You can also create and export a manual database snapshot at any time from **Settings $\rightarrow$ Backups $\rightarrow$ Create & Export Backup**.
 
 ---
 
-## 🗄️ Database Schema
-
-The SQLite database (stored at `~/.local/share/com.antigravity.milanote/milanote.db`) has the following schema:
-
-| Table | Purpose |
-|---|---|
-| `boards` | All boards with title, parent, and color theme |
-| `elements` | All canvas elements — position, type, content (JSON), style (JSON) |
-| `task_list_items` | Checklist items belonging to task_list elements |
-| `connectors` | Arrow/line connectors between elements |
-
----
-
-## 🚀 Getting Started
+## 🛠️ Building from Source
 
 ### Prerequisites
 - [Rust](https://rustup.rs/) (stable toolchain)
 - [Node.js](https://nodejs.org/) v18+
-- [Tauri v2 system dependencies](https://tauri.app/start/prerequisites/) for Linux (libwebkit2gtk, libgtk, etc.)
+- [Tauri v2 dependencies](https://tauri.app/start/prerequisites/) (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `librsvg2-dev`)
 
-### Installation & Run
+### Development Mode
 
 ```bash
-# Clone the repository
+# Clone repository
 git clone https://github.com/Anchxt11/the-game-note.git
 cd the-game-note
 
-# Install JS dependencies
+# Install frontend dependencies
 npm install
 
-# Run in development mode (hot reload)
+# Run desktop app with hot-reload
 npm run tauri dev
 ```
 
-### First-Time Launch
-On first launch, if the database is empty, `seed.rs` automatically populates a **Welcome Board** with demo elements (a note, image, link card, task list, column, sub-board, and a connector) so you can immediately see all features in action.
-
-### Build for Production
-
+### Build Desktop Packages (Linux)
 ```bash
 npm run tauri build
 ```
+Binaries will be output to:
+- `.deb`: `target/release/bundle/deb/`
+- `.AppImage`: `target/release/bundle/appimage/`
 
-The compiled `.AppImage` and `.deb` installer will appear in `src-tauri/target/release/bundle/`.
+### Build Android APK
+Ensure `ANDROID_HOME` and `NDK_HOME` are set in your environment:
+```bash
+npm run tauri android build -- --apk
+```
+Unsigned release APK will be generated at:
+`src-tauri/gen/android/app/build/outputs/apk/universal/release/`
 
----
-
-## 🛠️ Tech Stack
-
-| Layer | Technology |
-|---|---|
-| Desktop Shell | [Tauri v2](https://tauri.app/) |
-| Frontend | [React 18](https://react.dev/) + [TypeScript](https://www.typescriptlang.org/) |
-| Build Tool | [Vite 5](https://vitejs.dev/) |
-| Backend | [Rust](https://www.rust-lang.org/) |
-| Database | [rusqlite](https://github.com/rusqlite/rusqlite) (SQLite, bundled) |
-| Icons | [Lucide React](https://lucide.dev/) |
-| Styling | Vanilla CSS (custom design system in `index.css`) |
-
----
-
-## v2 Changes (Aug 2026)
-- **Migrated from localStorage to native rusqlite SQLite** — all data now persists in a real database file
-- **New Tauri IPC commands** — `update_element_content`, `update_element_style`, `update_element_board_id`, `sync_board_state`
-- **Proper UUID v4 element IDs** — using `crypto.randomUUID()` for native SQLite compatibility
-- **`ipc.ts` rewritten** — fully replaced the in-memory mock with native `invoke()` calls
-- **Root board resolver** — transparent `'root-board'` → real UUID mapping on first boot
+Sign the APK using `apksigner`:
+```bash
+apksigner sign --ks release.keystore --out GameNote-universal.apk <path-to-unsigned.apk>
+```
 
 ---
 
-## License
-MIT
+## 🏗️ Architecture & Tech Stack
+
+| Layer | Technology | Details |
+|---|---|---|
+| **Shell** | [Tauri v2](https://tauri.app/) | Native windowing, IPC commands, Android wrapper |
+| **Frontend** | [React 18](https://react.dev/) + [TypeScript](https://www.typescriptlang.org/) | Infinite canvas engine, CSS variables design system |
+| **Database** | [SQLite](https://www.sqlite.org/) + [`rusqlite`](https://github.com/rusqlite/rusqlite) | Local-first relational storage |
+| **CRDT Engine** | [`cr-sqlite`](https://github.com/vlcn-io/cr-sqlite) | Conflict-free replicated tables & Hybrid Logical Clocks |
+| **Encryption** | RustCrypto (`chacha20poly1305`, `hkdf`, `sha2`) | End-to-end encrypted sync payloads & tokens |
+| **Relay** | [Cloudflare Workers](https://workers.cloudflare.com/) + Durable Objects | SQLite-backed ephemeral real-time relay |
+
+---
+
+## 📄 License
+MIT License. Free and open source for personal and commercial use.

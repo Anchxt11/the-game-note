@@ -30,8 +30,8 @@ pub struct MailboxSettings {
 impl Default for MailboxSettings {
     fn default() -> Self {
         Self {
-            enabled: true,
-            url: "https://gamenote-mailbox.anchit-note.workers.dev".to_string(),
+            enabled: false,
+            url: "".to_string(),
             push_scope: "own".to_string(),
         }
     }
@@ -90,11 +90,6 @@ impl SyncConfig {
             if let Ok(bytes) = std::fs::read(&config_path) {
                 if let Ok(mut cfg) = serde_json::from_slice::<Self>(&bytes) {
                     let mut modified = false;
-                    if cfg.mailbox.url.trim().is_empty() {
-                        cfg.mailbox.url = "https://gamenote-mailbox.anchit-note.workers.dev".to_string();
-                        cfg.mailbox.enabled = true;
-                        modified = true;
-                    }
 
                     #[cfg(not(target_os = "android"))]
                     {

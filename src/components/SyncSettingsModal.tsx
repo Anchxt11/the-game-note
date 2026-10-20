@@ -92,13 +92,6 @@ export const SyncSettingsModal: React.FC<SyncSettingsModalProps> = ({ isOpen, on
       await syncService.clearInactivePeers().catch(() => {});
       const [c, s] = await Promise.all([syncService.getConfig(), syncService.getStatus()]);
 
-      // Ensure default mailbox URL is set if empty
-      if (c && (!c.mailbox.url || c.mailbox.url.trim() === '')) {
-        c.mailbox.url = 'https://gamenote-mailbox.anchit-note.workers.dev';
-        c.mailbox.enabled = true;
-        await syncService.saveConfig(c).catch(() => {});
-      }
-
       setConfig(c);
       setStatus(s);
       setDeviceNameInput(c?.device_name || 'My Device');
@@ -346,8 +339,11 @@ export const SyncSettingsModal: React.FC<SyncSettingsModalProps> = ({ isOpen, on
         {/* Modal Scrollable Content */}
         <div
           style={{
+            flex: 1,
+            minHeight: 0,
             padding: isMobile ? '16px 16px max(36px, env(safe-area-inset-bottom)) 16px' : '20px 24px',
             overflowY: 'auto',
+            WebkitOverflowScrolling: 'touch',
             display: 'flex',
             flexDirection: 'column',
             gap: '16px',
@@ -498,6 +494,66 @@ export const SyncSettingsModal: React.FC<SyncSettingsModalProps> = ({ isOpen, on
                       accentColor: '#2563eb',
                     }}
                   />
+                </div>
+
+                {/* Cloud Relay Endpoint URL Input (Always accessible directly in this card) */}
+                <div style={{ paddingTop: '12px', borderTop: '1px solid rgba(255, 255, 255, 0.06)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                    <label style={{ fontSize: '12px', color: '#cbd5e1', fontWeight: 500 }}>
+                      Cloud Relay Endpoint URL
+                    </label>
+                    {config.mailbox.url && (
+                      <button
+                        onClick={() => {
+                          const updated = {
+                            ...config,
+                            mailbox: {
+                              ...config.mailbox,
+                              url: '',
+                              enabled: false,
+                            },
+                          };
+                          handleSaveConfig(updated);
+                        }}
+                        style={{
+                          background: 'transparent',
+                          border: 'none',
+                          color: '#94a3b8',
+                          fontSize: '11px',
+                          cursor: 'pointer',
+                          textDecoration: 'underline',
+                        }}
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="https://gamenote-mailbox.<your-subdomain>.workers.dev"
+                    value={config.mailbox.url}
+                    onChange={(e) => {
+                      const updated = {
+                        ...config,
+                        mailbox: { ...config.mailbox, url: e.target.value },
+                      };
+                      setConfig(updated);
+                    }}
+                    onBlur={() => config && handleSaveConfig(config)}
+                    style={{
+                      width: '100%',
+                      background: '#27272a',
+                      border: '1px solid #3f3f46',
+                      borderRadius: '6px',
+                      padding: '8px 10px',
+                      color: '#f8fafc',
+                      fontSize: '12px',
+                      boxSizing: 'border-box',
+                    }}
+                  />
+                  <div style={{ fontSize: '11px', color: '#64748b', marginTop: '5px' }}>
+                    Deploy your own free worker via <code style={{ color: '#94a3b8', background: 'rgba(255,255,255,0.06)', padding: '1px 4px', borderRadius: '4px' }}>cd mailbox &amp;&amp; npx wrangler deploy</code>
+                  </div>
                 </div>
 
                 {/* Connection Status Pill & Security */}
@@ -1024,59 +1080,6 @@ export const SyncSettingsModal: React.FC<SyncSettingsModalProps> = ({ isOpen, on
                       borderTop: '1px solid rgba(255, 255, 255, 0.06)',
                     }}
                   >
-                    {/* Custom Worker URL */}
-                    <div>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                        <label style={{ fontSize: '12px', color: '#cbd5e1' }}>
-                          Cloud Relay Endpoint URL
-                        </label>
-                        <button
-                          onClick={() => {
-                            const updated = {
-                              ...config,
-                              mailbox: {
-                                ...config.mailbox,
-                                url: 'https://gamenote-mailbox.anchit-note.workers.dev',
-                              },
-                            };
-                            handleSaveConfig(updated);
-                          }}
-                          style={{
-                            background: 'transparent',
-                            border: 'none',
-                            color: '#38bdf8',
-                            fontSize: '11px',
-                            cursor: 'pointer',
-                            textDecoration: 'underline',
-                          }}
-                        >
-                          Reset to Default
-                        </button>
-                      </div>
-                      <input
-                        type="text"
-                        value={config.mailbox.url}
-                        onChange={(e) => {
-                          const updated = {
-                            ...config,
-                            mailbox: { ...config.mailbox, url: e.target.value },
-                          };
-                          setConfig(updated);
-                        }}
-                        onBlur={() => config && handleSaveConfig(config)}
-                        style={{
-                          width: '100%',
-                          background: '#27272a',
-                          border: '1px solid #3f3f46',
-                          borderRadius: '6px',
-                          padding: '8px 10px',
-                          color: '#f8fafc',
-                          fontSize: '12px',
-                          boxSizing: 'border-box',
-                        }}
-                      />
-                    </div>
-
                     {/* Server Port */}
                     <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
                       <div>

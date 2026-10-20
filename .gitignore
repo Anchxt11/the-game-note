@@ -29,5 +29,9 @@ src-tauri/gen/
 target/
 
 
+# Keystores & Android signing artifacts
+*.keystore
 release.keystore
+*.jks
 *.idsig
+*.apk
