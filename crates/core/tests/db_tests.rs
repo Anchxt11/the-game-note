@@ -208,3 +208,25 @@ fn test_seed_and_search() {
     let task_results = db.search_boards("rusqlite").unwrap();
     assert!(!task_results.is_empty(), "Should find task list item containing 'rusqlite'");
 }
+
+#[test]
+fn test_embedded_crsqlite_extraction_and_load() {
+    let temp_dir = tempfile::tempdir().expect("Create tempdir");
+    let extracted_so = milanote_core::db::extract_embedded_crsqlite_to(temp_dir.path())
+        .expect("Should extract embedded crsqlite to temp dir");
+
+    assert!(extracted_so.exists(), "Extracted library file should exist");
+    assert!(extracted_so.metadata().unwrap().len() > 1_000_000, "Extracted library should be valid size");
+
+    let conn = rusqlite::Connection::open_in_memory().expect("Open SQLite conn");
+    let _guard = unsafe { rusqlite::LoadExtensionGuard::new(&conn).expect("Extension guard") };
+    unsafe {
+        conn.load_extension(&extracted_so, Some("sqlite3_crsqlite_init"))
+            .expect("Load extracted extension into SQLite");
+    }
+
+    let site_id_hex: String = conn
+        .query_row("SELECT hex(crsql_site_id())", [], |r| r.get(0))
+        .expect("Query crsql_site_id");
+    assert!(!site_id_hex.is_empty(), "crsqlite site_id should be accessible from extracted extension");
+}

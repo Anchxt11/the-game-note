@@ -16,6 +16,80 @@ pub struct Database {
     conn: Arc<Mutex<Connection>>,
 }
 
+#[cfg(all(not(target_os = "android"), target_arch = "x86_64"))]
+const EMBEDDED_CRSQLITE: &[u8] = include_bytes!("../libs/x86_64/libcrsqlite.so");
+
+#[cfg(all(not(target_os = "android"), not(target_arch = "x86_64")))]
+const EMBEDDED_CRSQLITE: &[u8] = &[];
+
+#[cfg(not(target_os = "android"))]
+pub fn extract_embedded_crsqlite_to(target_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    if EMBEDDED_CRSQLITE.is_empty() {
+        return None;
+    }
+
+    if let Err(e) = std::fs::create_dir_all(target_dir) {
+        log::warn!("Could not create directory {:?} for crsqlite extraction: {}", target_dir, e);
+        return None;
+    }
+
+    let target_path = target_dir.join("libcrsqlite.so");
+    let needs_write = match std::fs::metadata(&target_path) {
+        Ok(meta) => meta.len() != EMBEDDED_CRSQLITE.len() as u64,
+        Err(_) => true,
+    };
+
+    if needs_write {
+        use std::io::Write;
+        let temp_path = target_dir.join(format!(".libcrsqlite.so.tmp.{}", std::process::id()));
+        let write_res = (|| -> std::io::Result<()> {
+            let mut file = std::fs::File::create(&temp_path)?;
+            file.write_all(EMBEDDED_CRSQLITE)?;
+            file.flush()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let perms = std::fs::Permissions::from_mode(0o755);
+                let _ = std::fs::set_permissions(&temp_path, perms);
+            }
+            std::fs::rename(&temp_path, &target_path)?;
+            Ok(())
+        })();
+
+        if let Err(e) = write_res {
+            log::warn!("Failed writing embedded crsqlite to {:?}: {}", target_path, e);
+            let _ = std::fs::remove_file(&temp_path);
+            return None;
+        } else {
+            log::info!("Successfully extracted embedded libcrsqlite to {:?}", target_path);
+        }
+    }
+
+    if target_path.exists() {
+        Some(target_path)
+    } else {
+        None
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn extract_embedded_crsqlite() -> Option<std::path::PathBuf> {
+    if let Ok(dir_str) = std::env::var("CRSQLITE_DATA_DIR") {
+        if let Some(p) = extract_embedded_crsqlite_to(std::path::Path::new(&dir_str)) {
+            return Some(p);
+        }
+    }
+
+    if let Some(proj_dirs) = ProjectDirs::from("com", "anchit", "gameNote") {
+        if let Some(p) = extract_embedded_crsqlite_to(proj_dirs.data_dir()) {
+            return Some(p);
+        }
+    }
+
+    let temp_sub = std::env::temp_dir().join("com.anchit.gameNote");
+    extract_embedded_crsqlite_to(&temp_sub)
+}
+
 pub fn find_crsqlite_path() -> std::path::PathBuf {
     #[cfg(target_os = "android")]
     {
@@ -24,10 +98,32 @@ pub fn find_crsqlite_path() -> std::path::PathBuf {
 
     #[cfg(not(target_os = "android"))]
     {
+        // 1. Explicit file path override
         if let Ok(path_str) = std::env::var("CRSQLITE_PATH") {
             let p = std::path::PathBuf::from(path_str);
             if p.exists() {
                 return p;
+            }
+        }
+
+        // 2. Explicit runtime data directory (passed from Tauri app_data_dir or test harness)
+        if let Ok(dir_str) = std::env::var("CRSQLITE_DATA_DIR") {
+            if let Some(p) = extract_embedded_crsqlite_to(std::path::Path::new(&dir_str)) {
+                return p;
+            }
+        }
+
+        // 3. Executable parent directory (bundled next to app binary)
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                let p1 = parent.join("libcrsqlite.so");
+                if p1.exists() {
+                    return p1;
+                }
+                let p2 = parent.join("crsqlite.so");
+                if p2.exists() {
+                    return p2;
+                }
             }
         }
 
@@ -37,7 +133,7 @@ pub fn find_crsqlite_path() -> std::path::PathBuf {
             "x86_64"
         };
 
-        // Relative to compile-time manifest dir (cargo tests and development)
+        // 4. Relative to compile-time manifest dir (cargo tests and development only)
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
         let manifest_p1 = std::path::Path::new(manifest_dir)
             .join("libs")
@@ -54,21 +150,12 @@ pub fn find_crsqlite_path() -> std::path::PathBuf {
             return manifest_p2;
         }
 
-        // Executable parent directory
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(parent) = exe.parent() {
-                let p1 = parent.join("libcrsqlite.so");
-                if p1.exists() {
-                    return p1;
-                }
-                let p2 = parent.join("crsqlite.so");
-                if p2.exists() {
-                    return p2;
-                }
-            }
+        // 5. Self-extraction for standalone / distributed releases (~/.local/share/com.anchit.gameNote)
+        if let Some(extracted) = extract_embedded_crsqlite() {
+            return extracted;
         }
 
-        // Relative to current working dir
+        // 6. Relative to current working dir
         let cwd_p1 = std::path::Path::new("crates/core/libs")
             .join(arch)
             .join("libcrsqlite.so");

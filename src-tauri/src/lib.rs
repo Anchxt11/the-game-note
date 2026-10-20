@@ -28,6 +28,8 @@ pub fn run() {
             std::fs::create_dir_all(&app_data_dir)
                 .expect("Failed to create app data directory");
 
+            std::env::set_var("CRSQLITE_DATA_DIR", &app_data_dir);
+
             let db_path = app_data_dir.join("milanote.db");
             println!("Opening database at: {}", db_path.display());
 
