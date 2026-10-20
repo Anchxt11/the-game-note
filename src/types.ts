@@ -65,7 +65,7 @@ export interface TaskListItem {
   element_id: string;
   text: string;
   is_checked: boolean;
-  order_index: number;
+  order_index: string;
 }
 
 export interface Connector {

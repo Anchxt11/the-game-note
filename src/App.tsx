@@ -14,7 +14,13 @@ import { TableActionSidebar } from './components/TableActionSidebar';
 import { CellActionSidebar } from './components/CellActionSidebar';
 import { Canvas } from './components/Canvas';
 import { ContextMenu } from './components/ContextMenu';
-import { ipcService } from './services/ipc';
+import { SearchModal } from './components/SearchModal';
+import { MobileBottomBar } from './components/MobileBottomBar';
+import { SyncStatusIndicator } from './components/SyncStatusIndicator';
+import { SyncSettingsModal } from './components/SyncSettingsModal';
+import { isPhoneScreen, isTouchPrimary, isTablet, isAndroidTablet, getDeviceCategory } from './utils/platform';
+import { ipcService, syncService, resolveBoardId, CANONICAL_ROOT_BOARD_ID } from './services/ipc';
+import { listen } from '@tauri-apps/api/event';
 import { 
   Search as SearchIcon, 
   Undo2, 
@@ -26,7 +32,10 @@ import {
   Folder,
   Users,
   ChevronDown,
-  Minimize2
+  ChevronLeft,
+  UserPlus,
+  Minimize2,
+  ArrowLeft
 } from 'lucide-react';
 import './index.css';
 
@@ -38,7 +47,10 @@ export const App: React.FC = () => {
   const [editingElementId, setEditingElementId] = useState<string | null>(null);
   const [renamingLinkId, setRenamingLinkId] = useState<string | null>(null);
   const [canvasScale, setCanvasScale] = useState<number>(1.0);
+  const [minCanvasScale, setMinCanvasScale] = useState<number>(0.40);
   const [isUnsortedDrawerOpen, setIsUnsortedDrawerOpen] = useState(false);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [isSyncSettingsOpen, setIsSyncSettingsOpen] = useState(false);
   const [selectedTableCells, setSelectedTableCells] = useState<{ tableId: string; cellIndices: number[] } | null>(null);
   const pendingUnsortedBoardsRef = useRef<Set<string>>(new Set());
   
@@ -51,6 +63,12 @@ export const App: React.FC = () => {
 
   // Context Menu and Clipboard state
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; canvasX?: number; canvasY?: number; element: Element | null; tableSubTarget?: TableSubTarget } | null>(null);
+  const [, setWindowResizeTrigger] = useState(0);
+  useEffect(() => {
+    const handleResize = () => setWindowResizeTrigger((v) => v + 1);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
   const [clipboardElements, setClipboardElements] = useState<Element[]>(() => {
     try {
       const stored = localStorage.getItem('milanote_clipboard');
@@ -61,14 +79,33 @@ export const App: React.FC = () => {
   // Active Board Navigation
   const [currentBoardId, setCurrentBoardId] = useState<string>(() => {
     try {
-      return localStorage.getItem('milanote_current_board') || 'root-board';
-    } catch { return 'root-board'; }
+      const stored = localStorage.getItem('milanote_current_board');
+      if (stored && stored !== 'root-board' && stored !== '00000000-0000-0000-0000-000000000001') {
+        return stored;
+      }
+      return CANONICAL_ROOT_BOARD_ID;
+    } catch { return CANONICAL_ROOT_BOARD_ID; }
   });
   const [boardHistory, setBoardHistory] = useState<Array<{ id: string; title: string }>>(() => {
     try {
       const stored = localStorage.getItem('milanote_board_history');
-      return stored ? JSON.parse(stored) : [{ id: 'root-board', title: 'Home' }];
-    } catch { return [{ id: 'root-board', title: 'Home' }]; }
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          return parsed.map((item: any, idx: number) => {
+            let id = item.id;
+            if (id === 'root-board' || id === '00000000-0000-0000-0000-000000000001') {
+              id = CANONICAL_ROOT_BOARD_ID;
+            }
+            if (idx === 0 && (item.title === 'Welcome to Antigravity Board' || !item.title)) {
+              return { ...item, id, title: 'Home' };
+            }
+            return { ...item, id };
+          });
+        }
+      }
+      return [{ id: CANONICAL_ROOT_BOARD_ID, title: 'Home' }];
+    } catch { return [{ id: CANONICAL_ROOT_BOARD_ID, title: 'Home' }]; }
   });
   
   useEffect(() => {
@@ -79,9 +116,37 @@ export const App: React.FC = () => {
     localStorage.setItem('milanote_board_history', JSON.stringify(boardHistory));
   }, [boardHistory]);
 
+  useEffect(() => {
+    const updateDeviceClasses = () => {
+      const cat = getDeviceCategory();
+      if (cat === 'tablet') {
+        document.body.classList.add('device-tablet');
+        document.body.classList.remove('device-phone');
+      } else if (cat === 'phone') {
+        document.body.classList.add('device-phone');
+        document.body.classList.remove('device-tablet');
+      } else {
+        document.body.classList.remove('device-phone');
+        document.body.classList.remove('device-tablet');
+      }
+    };
+    updateDeviceClasses();
+    window.addEventListener('resize', updateDeviceClasses);
+    return () => window.removeEventListener('resize', updateDeviceClasses);
+  }, []);
+
   const [showViewMenu, setShowViewMenu] = useState<boolean>(false);
   const [isPresentationMode, setIsPresentationMode] = useState<boolean>(false);
   const [dragHoverBoardId, setDragHoverBoardId] = useState<string | null>(null);
+  const [twoFingerMenu, setTwoFingerMenu] = useState<{ canvasX: number; canvasY: number } | null>(null);
+  const [resetMobileBarTrigger, setResetMobileBarTrigger] = useState<number>(0);
+
+  const handleCanvasClick = useCallback(() => {
+    setResetMobileBarTrigger((prev) => prev + 1);
+    setTwoFingerMenu(null);
+    setIsUnsortedDrawerOpen(false);
+    setEditingElementId(null);
+  }, []);
 
   const recordHistory = useCallback((currentState: Element[]) => {
     setUndoStack((prev) => [...prev.slice(-30), currentState]);
@@ -139,8 +204,10 @@ export const App: React.FC = () => {
     }
   }, []);
 
+  // Canvas Element Loader & Non-blocking Background Sync
   useEffect(() => {
     loadElements(currentBoardId);
+    syncService.triggerSync().catch((e) => console.warn('Background sync note:', e));
     try {
       let savedBg = localStorage.getItem(`milanote_bg_${currentBoardId}`) || 'rgb(35, 35, 35)';
       if (savedBg === '#1f2125') savedBg = 'rgb(35, 35, 35)';
@@ -148,16 +215,186 @@ export const App: React.FC = () => {
     } catch {}
   }, [currentBoardId, loadElements]);
 
-  const handleCopy = useCallback(() => {
-    const idsToCopy = selectedIds.length > 0 ? selectedIds : selectedElementId ? [selectedElementId] : [];
+  const currentBoardIdRef = useRef(currentBoardId);
+  currentBoardIdRef.current = currentBoardId;
+
+  const editingElementIdRef = useRef(editingElementId);
+  editingElementIdRef.current = editingElementId;
+
+  // Phase 5: Reactive UI refresh when background sync merges changes (Task 5.9)
+  const refreshCurrentBoardElements = useCallback(async () => {
+    try {
+      const activeBoardId = currentBoardIdRef.current;
+      const data = await ipcService.getElementsForBoard(activeBoardId);
+      setElements((prev) => {
+        const editingId = editingElementIdRef.current;
+        if (editingId) {
+          const currentlyEditing = prev.find((e) => e.id === editingId);
+          if (currentlyEditing) {
+            return data.map((d) => (d.id === editingId ? currentlyEditing : d));
+          }
+        }
+        return data;
+      });
+      // Also update board title if it was modified remotely
+      try {
+        const allBoards = await ipcService.listBoards(null);
+        const resolvedCurrentId = await resolveBoardId(activeBoardId);
+        const current = allBoards.find((b) => b.id === resolvedCurrentId);
+        if (current) {
+          const displayTitle = (current.title === 'Welcome to Antigravity Board' || !current.title) ? 'Home' : current.title;
+          setBoardHistory((prev) => {
+            if (prev.length === 1 && prev[0].title !== displayTitle) {
+              return [{ id: prev[0].id, title: displayTitle }];
+            }
+            return prev;
+          });
+        }
+      } catch (_) {}
+    } catch (e) {
+      console.error('Failed to refresh elements after sync:', e);
+    }
+  }, []);
+
+  // Initial check to normalize root board title to 'Home' across all platforms
+  useEffect(() => {
+    (async () => {
+      try {
+        const allBoards = await ipcService.listBoards(null);
+        if (allBoards.length > 0) {
+          const rootBoard = allBoards[0];
+          if (rootBoard.title === 'Welcome to Antigravity Board' || !rootBoard.title) {
+            await ipcService.updateBoard(rootBoard.id, 'Home');
+            setBoardHistory((prev) => prev.map((item, i) => i === 0 ? { ...item, title: 'Home' } : item));
+          } else {
+            setBoardHistory((prev) => prev.map((item, i) => i === 0 ? { ...item, title: rootBoard.title || 'Home' } : item));
+          }
+        }
+      } catch (err) {
+        console.error('Failed to normalize root board title:', err);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let coalesceTimer: any = null;
+
+    listen('sync-applied', () => {
+      if (coalesceTimer) clearTimeout(coalesceTimer);
+      coalesceTimer = setTimeout(() => {
+        refreshCurrentBoardElements();
+      }, 30);
+    }).then((unsub) => {
+      unlisten = unsub;
+    });
+
+    return () => {
+      if (unlisten) unlisten();
+      if (coalesceTimer) clearTimeout(coalesceTimer);
+    };
+  }, [refreshCurrentBoardElements]);
+
+  // Phase 5: Continuous background auto-sync (every 2s) + reload on app open/focus/resume
+  useEffect(() => {
+    const triggerSyncCycle = async () => {
+      try {
+        const results = await syncService.triggerSync();
+        let changesCount = 0;
+        if (Array.isArray(results)) {
+          for (const item of results) {
+            const stats = Array.isArray(item) ? item[1] : item;
+            if (stats && typeof stats === 'object') {
+              changesCount += (stats.rows_pulled || 0) + (stats.rows_pushed || 0);
+            }
+          }
+        } else if (results && typeof results === 'object') {
+          for (const res of Object.values(results) as any[]) {
+            const stats = Array.isArray(res) ? res[1] : res;
+            if (stats && typeof stats === 'object') {
+              changesCount += (stats.rows_pulled || 0) + (stats.rows_pushed || 0);
+            }
+          }
+        }
+        if (changesCount > 0) {
+          await refreshCurrentBoardElements();
+        }
+      } catch (_) {}
+    };
+
+    // 1. Immediate sync on app launch / reload
+    triggerSyncCycle();
+
+    // 2. On window focus or app visibility change (e.g. Android app resumed from background)
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        triggerSyncCycle();
+        refreshCurrentBoardElements();
+      }
+    };
+    window.addEventListener('focus', handleVisibility);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    // 3. Periodic continuous sync timer: syncs every 2 seconds
+    const intervalTimer = setInterval(triggerSyncCycle, 2000);
+
+    return () => {
+      window.removeEventListener('focus', handleVisibility);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      clearInterval(intervalTimer);
+    };
+  }, [refreshCurrentBoardElements]);
+
+  // Phase 5: Debounced sync on local write (sub-second sync)
+  const syncDebounceRef = useRef<any>(null);
+  const queueDebouncedSync = useCallback((immediate = false) => {
+    if (syncDebounceRef.current) clearTimeout(syncDebounceRef.current);
+    const doSync = async () => {
+      try {
+        const results = await syncService.triggerSync();
+        let pulled = 0;
+        if (Array.isArray(results)) {
+          for (const item of results) {
+            const stats = Array.isArray(item) ? item[1] : item;
+            if (stats && typeof stats === 'object') {
+              pulled += stats.rows_pulled || 0;
+            }
+          }
+        }
+        if (pulled > 0) {
+          await refreshCurrentBoardElements();
+        }
+      } catch (_) {}
+    };
+    if (immediate) {
+      doSync();
+    } else {
+      syncDebounceRef.current = setTimeout(doSync, 150);
+    }
+  }, [refreshCurrentBoardElements]);
+
+  const handleCopy = useCallback((targetId?: string) => {
+    const idsToCopy = selectedIds.length > 0 
+      ? selectedIds 
+      : targetId 
+        ? [targetId] 
+        : selectedElementId 
+          ? [selectedElementId] 
+          : (contextMenu?.element ? [contextMenu.element.id] : []);
     if (idsToCopy.length === 0) return;
     const copies = elements.filter((el) => idsToCopy.includes(el.id)).map((el) => JSON.parse(JSON.stringify(el)));
     setClipboardElements(copies);
     try { localStorage.setItem('milanote_clipboard', JSON.stringify(copies)); } catch {}
-  }, [selectedIds, selectedElementId, elements]);
+  }, [selectedIds, selectedElementId, elements, contextMenu]);
 
-  const handleCut = useCallback(() => {
-    const idsToCopy = selectedIds.length > 0 ? selectedIds : selectedElementId ? [selectedElementId] : [];
+  const handleCut = useCallback((targetId?: string) => {
+    const idsToCopy = selectedIds.length > 0 
+      ? selectedIds 
+      : targetId 
+        ? [targetId] 
+        : selectedElementId 
+          ? [selectedElementId] 
+          : (contextMenu?.element ? [contextMenu.element.id] : []);
     if (idsToCopy.length === 0) return;
     const copies = elements.filter((el) => idsToCopy.includes(el.id)).map((el) => JSON.parse(JSON.stringify(el)));
     setClipboardElements(copies);
@@ -169,7 +406,7 @@ export const App: React.FC = () => {
     setSelectedIds([]);
     setSelectedElementId(null);
     setContextMenu(null);
-  }, [selectedIds, selectedElementId, elements, recordHistory]);
+  }, [selectedIds, selectedElementId, elements, recordHistory, contextMenu]);
 
   const handlePaste = useCallback((targetX?: number, targetY?: number) => {
     if (!clipboardElements || clipboardElements.length === 0) return;
@@ -201,7 +438,8 @@ export const App: React.FC = () => {
     setSelectedIds(newElements.map((el) => el.id));
     setSelectedElementId(newElements.length === 1 ? newElements[0].id : null);
     setContextMenu(null);
-  }, [clipboardElements, elements, recordHistory, currentBoardId]);
+    queueDebouncedSync(true);
+  }, [clipboardElements, elements, recordHistory, currentBoardId, queueDebouncedSync]);
 
   const handleSelectAll = useCallback(() => {
     const allIds = elements.map((el) => el.id);
@@ -275,6 +513,12 @@ export const App: React.FC = () => {
         }
       }
 
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        setIsSearchOpen((prev) => !prev);
+        return;
+      }
+
       if (isTyping || editingElementId) return;
 
       if (e.key === 'Delete' || e.key === 'Del' || e.key === 'Backspace') {
@@ -300,17 +544,29 @@ export const App: React.FC = () => {
 
   const [isElementBeingDragged, setIsElementBeingDragged] = useState(false);
 
+  const handleSwitchBoard = useCallback((boardId: string, title?: string, isRoot: boolean = false) => {
+    setCurrentBoardId(boardId);
+    setSelectedElementId(null);
+    setSelectedIds([]);
+    setEditingElementId(null);
+    setIsUnsortedDrawerOpen(false);
+    if (isRoot) {
+      setBoardHistory([{ id: boardId, title: title || 'Home' }]);
+    } else {
+      setBoardHistory((prev) => {
+        if (prev.some(p => p.id === boardId)) {
+          return prev.slice(0, prev.findIndex(p => p.id === boardId) + 1);
+        }
+        return [...prev, { id: boardId, title: title || 'Board' }];
+      });
+    }
+  }, []);
+
   const handleOpenBoard = useCallback((targetBoardId: string, keepSelection: boolean = false) => {
     const el = elements.find((x) => x.id === targetBoardId || x.content?.target_board_id === targetBoardId);
     const realBoardId = el?.content?.target_board_id || targetBoardId;
     const title = el?.content?.title || el?.content?.preview_title || 'Board';
-    setCurrentBoardId(realBoardId);
-    setBoardHistory((prev) => {
-      if (prev.some(p => p.id === realBoardId)) {
-        return prev.slice(0, prev.findIndex(p => p.id === realBoardId) + 1);
-      }
-      return [...prev, { id: realBoardId, title }];
-    });
+    handleSwitchBoard(realBoardId, title, false);
     if (!keepSelection) {
       setSelectedElementId(null);
       setSelectedIds([]);
@@ -322,7 +578,7 @@ export const App: React.FC = () => {
     } else if (!keepSelection) {
       setIsUnsortedDrawerOpen(false);
     }
-  }, [elements]);
+  }, [elements, handleSwitchBoard]);
 
   const handleMoveElementToBoard = useCallback(async (elementId: string, targetBoardId: string, x?: number, y?: number, isFromBreadcrumb?: boolean, isEnterHover?: boolean) => {
     recordHistory(elements);
@@ -426,6 +682,18 @@ export const App: React.FC = () => {
     }
   }, [elements, recordHistory, canvasScale]);
 
+  const handleMoveUnsortedElementToCanvasCenter = useCallback((element: Element) => {
+    const vp = document.querySelector('.canvas-viewport') as HTMLElement | null;
+    let clientX = window.innerWidth / 2;
+    let clientY = window.innerHeight / 2;
+    if (vp) {
+      const rect = vp.getBoundingClientRect();
+      clientX = rect.left + rect.width / 2;
+      clientY = rect.top + rect.height / 2;
+    }
+    handleMoveFromUnsortedToCanvas(element, clientX, clientY);
+  }, [handleMoveFromUnsortedToCanvas]);
+
   const handleBreadcrumbClick = (index: number) => {
     const nextHistory = boardHistory.slice(0, index + 1);
     const target = nextHistory[nextHistory.length - 1];
@@ -453,6 +721,7 @@ export const App: React.FC = () => {
 
     try {
       await ipcService.batchUpdateElementPositions(updates);
+      queueDebouncedSync(true);
     } catch (e) {
       console.error('Failed to batch update positions:', e);
     }
@@ -463,6 +732,7 @@ export const App: React.FC = () => {
     setElements((prev) => prev.map((el) => (el.id === id ? { ...el, content: newContent } : el)));
     try {
       await ipcService.updateElementContent(id, newContent);
+      queueDebouncedSync(false);
     } catch (e) {
       console.error('Failed to update content:', e);
     }
@@ -473,22 +743,67 @@ export const App: React.FC = () => {
     setElements((prev) => prev.map((el) => (el.id === id ? { ...el, style: newStyle } : el)));
     try {
       await ipcService.updateElementStyle(id, newStyle);
+      queueDebouncedSync(true);
     } catch (e) {
       console.error('Failed to update style:', e);
     }
   };
 
-  const handleRecolor = async (tint: CardColorTint) => {
-    if (!contextMenu || !contextMenu.element) return;
-    const targetId = contextMenu.element.id;
-    const newStyle = { ...(contextMenu.element.style || {}), color_tint: tint };
-    handleStyleChange(targetId, newStyle);
+  const handleScaleToFit = useCallback(() => {
+    const activeEls = elements.filter(
+      (el) => !el.style?.is_unsorted && !el.style?.parent_column_id && el.element_type !== 'line'
+    );
+    if (activeEls.length === 0) {
+      setCanvasScale(1.0);
+      return;
+    }
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    activeEls.forEach((el) => {
+      const w = el.width || (el.element_type === 'nested_board' ? 80 : 340);
+      const h = el.height || (el.element_type === 'nested_board' ? 100 : 60);
+      if (el.x < minX) minX = el.x;
+      if (el.x + w > maxX) maxX = el.x + w;
+      if (el.y < minY) minY = el.y;
+      if (el.y + h > maxY) maxY = el.y + h;
+    });
+
+    const contentW = maxX - minX;
+    const contentH = maxY - minY;
+    const vp = document.querySelector('.canvas-viewport') as HTMLElement | null;
+    const vpW = vp ? vp.clientWidth : window.innerWidth;
+    const vpH = vp ? vp.clientHeight : window.innerHeight;
+
+    const availW = Math.max(100, vpW - 140);
+    const availH = Math.max(100, vpH - 140);
+
+    const fitScaleX = availW / Math.max(contentW, 100);
+    const fitScaleY = availH / Math.max(contentH, 100);
+    const calculatedFit = Math.min(fitScaleX, fitScaleY);
+    const targetScale = calculatedFit < 0.40
+      ? Math.max(0.05, Number(calculatedFit.toFixed(2)))
+      : Math.min(1.0, Math.max(minCanvasScale, Number(calculatedFit.toFixed(2))));
+
+    setCanvasScale(targetScale);
+  }, [elements, minCanvasScale]);
+
+  const handleRecolor = async (tintOrColor: CardColorTint | string, targetId?: string) => {
+    const el = contextMenu?.element || elements.find(item => item.id === (targetId || selectedElementId)) || null;
+    if (!el) return;
+    if (el.element_type === 'line') {
+      handleStyleChange(el.id, { ...(el.style || {}), line_color: tintOrColor });
+      return;
+    }
+    const isHexOrColor = tintOrColor.startsWith('#') || tintOrColor === 'transparent' || tintOrColor.startsWith('rgb');
+    const newStyle = isHexOrColor
+      ? { ...(el.style || {}), background_color: tintOrColor === 'transparent' ? undefined : tintOrColor }
+      : { ...(el.style || {}), color_tint: tintOrColor as CardColorTint };
+    handleStyleChange(el.id, newStyle);
   };
 
-  const handleDuplicate = async () => {
-    if (!contextMenu || !contextMenu.element) return;
+  const handleDuplicate = async (targetId?: string) => {
+    const el = contextMenu?.element || elements.find(item => item.id === (targetId || selectedElementId)) || null;
+    if (!el) return;
     recordHistory(elements);
-    const el = contextMenu.element;
     const newEl = await ipcService.createElement({
       board_id: el.board_id,
       element_type: el.element_type,
@@ -496,11 +811,14 @@ export const App: React.FC = () => {
       y: el.y + 36,
       width: el.width,
       height: el.height,
-      z_index: el.z_index + 1,
+      z_index: (el.z_index || 10) + 1,
       content: { ...el.content, title: el.content.title ? `${el.content.title} (Copy)` : undefined },
       style: { ...el.style },
     });
     setElements((prev) => [...prev, newEl]);
+    setSelectedElementId(newEl.id);
+    setSelectedIds([newEl.id]);
+    queueDebouncedSync(true);
   };
 
   const handleDelete = async (idToDelete?: string) => {
@@ -528,18 +846,19 @@ export const App: React.FC = () => {
         console.error('Failed to delete element:', e);
       }
     }
+    queueDebouncedSync(true);
   };
 
-  const handleToggleLock = async () => {
-    if (!contextMenu || !contextMenu.element) return;
-    const el = contextMenu.element;
+  const handleToggleLock = async (targetId?: string) => {
+    const el = contextMenu?.element || elements.find(item => item.id === (targetId || selectedElementId)) || null;
+    if (!el) return;
     const nextLocked = !Boolean(el.style?.is_locked);
     handleStyleChange(el.id, { ...(el.style || {}), is_locked: nextLocked });
   };
 
-  const handleBringToFront = async () => {
-    if (!contextMenu || !contextMenu.element) return;
-    const el = contextMenu.element;
+  const handleBringToFront = async (targetId?: string) => {
+    const el = contextMenu?.element || elements.find(item => item.id === (targetId || selectedElementId)) || null;
+    if (!el) return;
     const maxZ = Math.max(...elements.map((item) => item.z_index || 10), 10);
     const newZ = maxZ + 1;
     handleUpdateElementPositions([
@@ -547,9 +866,9 @@ export const App: React.FC = () => {
     ]);
   };
 
-  const handleSendToBack = async () => {
-    if (!contextMenu || !contextMenu.element) return;
-    const el = contextMenu.element;
+  const handleSendToBack = async (targetId?: string) => {
+    const el = contextMenu?.element || elements.find(item => item.id === (targetId || selectedElementId)) || null;
+    if (!el) return;
     const minZ = Math.min(...elements.map((item) => item.z_index || 10), 10);
     if (minZ > 1) {
       const newZ = minZ - 1;
@@ -676,7 +995,7 @@ export const App: React.FC = () => {
       const draggedUrl = (window as any).__MILANOTE_DRAGGED_IMAGE_URL__;
       const draggedCaption = (window as any).__MILANOTE_DRAGGED_IMAGE_CAPTION__;
       initialContent = { 
-        url: draggedUrl || 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=800&q=80', 
+        url: draggedUrl || '', 
         caption: draggedCaption || '' 
       };
       (window as any).__MILANOTE_DRAGGED_IMAGE_URL__ = undefined;
@@ -742,11 +1061,13 @@ export const App: React.FC = () => {
     if (destBoardId === currentBoardId) {
       setElements((prev) => [...prev, newEl]);
       setSelectedElementId(newEl.id);
+      setSelectedIds([newEl.id]);
 
       if (tool === 'note' || tool === 'heading' || tool === 'link' || tool === 'task_list') {
         setEditingElementId(newEl.id);
       }
     }
+    queueDebouncedSync(true);
   };
 
   const handleCreateTaskListFromItem = async (x: number, y: number, item: any, targetColumnId?: string) => {
@@ -771,15 +1092,97 @@ export const App: React.FC = () => {
 
     setElements((prev) => [...prev, newEl]);
     setSelectedElementId(newEl.id);
+    setSelectedIds([newEl.id]);
+    queueDebouncedSync(true);
   };
 
-  const handleCreateQuickLine = async (sourceElId: string): Promise<string | undefined> => {
+  const handleDropToolAtScreen = (tool: ToolType, clientX: number, clientY: number) => {
+    // Check if dropped onto Unsorted Drawer or floating pill
+    const unsortedDrawerEl = document.querySelector('.unsorted-drawer');
+    const unsortedPillEl = document.querySelector('.mobile-unsorted-floating-pill');
+    let isOverUnsorted = false;
+    if (unsortedDrawerEl) {
+      const uRect = unsortedDrawerEl.getBoundingClientRect();
+      if (clientX >= uRect.left && clientX <= uRect.right && clientY >= uRect.top && clientY <= uRect.bottom) {
+        isOverUnsorted = true;
+      }
+    }
+    if (unsortedPillEl) {
+      const pRect = unsortedPillEl.getBoundingClientRect();
+      if (clientX >= pRect.left && clientX <= pRect.right && clientY >= pRect.top && clientY <= pRect.bottom) {
+        isOverUnsorted = true;
+      }
+    }
+
+    if (isOverUnsorted) {
+      handleDropTool(tool, 100, 100, undefined, true);
+      return;
+    }
+
+    const vp = document.querySelector('.canvas-viewport') as HTMLElement | null;
+    let targetX = 100;
+    let targetY = 100;
+    if (vp) {
+      const rect = vp.getBoundingClientRect();
+      const panX = parseFloat(vp.getAttribute('data-pan-x') || '0');
+      const panY = parseFloat(vp.getAttribute('data-pan-y') || '0');
+      targetX = (clientX - rect.left - panX) / canvasScale;
+      targetY = (clientY - rect.top - panY) / canvasScale;
+    }
+
+    let targetColumnId: string | undefined = undefined;
+    let targetBoardId: string | undefined = undefined;
+
+    // Check if dropped onto a column
+    const colEls = elements.filter(el => el.element_type === 'column' && !el.style?.is_unsorted);
+    for (const col of colEls) {
+      const cDiv = document.getElementById(`milanote-el-${col.id}`);
+      if (cDiv) {
+        const r = cDiv.getBoundingClientRect();
+        if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) {
+          targetColumnId = col.id;
+          break;
+        }
+      }
+    }
+
+    // Check if dropped onto a nested board
+    if (!targetColumnId) {
+      const bEls = elements.filter(el => el.element_type === 'nested_board' && !el.style?.is_unsorted);
+      for (const b of bEls) {
+        const bDiv = document.getElementById(`milanote-el-${b.id}`);
+        if (bDiv) {
+          const r = bDiv.getBoundingClientRect();
+          if (clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom) {
+            targetBoardId = b.content?.target_board_id || b.id;
+            break;
+          }
+        }
+      }
+    }
+
+    let offsetX = 100;
+    let offsetY = 30;
+    if (tool === 'nested_board') {
+      offsetX = 50;
+      offsetY = 50;
+    } else if (tool === 'column') {
+      offsetX = 120;
+      offsetY = 40;
+    }
+
+    handleDropTool(tool, Math.round(targetX - offsetX), Math.round(targetY - offsetY), targetColumnId, false, targetBoardId);
+  };
+
+  const handleCreateQuickLine = async (sourceElId: string): Promise<string> => {
     recordHistory(elements);
     const sourceEl = elements.find(el => el.id === sourceElId);
     const startX = sourceEl ? sourceEl.x + (sourceEl.width || 340) / 2 : 0;
     const startY = sourceEl ? sourceEl.y + (sourceEl.height || 60) / 2 : 0;
+    const newId = crypto.randomUUID();
 
-    const newEl = await ipcService.createElement({
+    const newEl: Element = {
+      id: newId,
       board_id: currentBoardId,
       element_type: 'line',
       x: startX,
@@ -790,8 +1193,8 @@ export const App: React.FC = () => {
       content: {
         start_x: 0,
         start_y: 0,
-        end_x: 50,
-        end_y: 0,
+        end_x: 60,
+        end_y: 60,
         control_offset_x: 0,
         control_offset_y: 0,
         start_target_id: sourceElId,
@@ -810,11 +1213,30 @@ export const App: React.FC = () => {
         is_dashed: false,
         line_weight: 2
       },
-    });
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
 
     setElements((prev) => [...prev, newEl]);
-    return newEl.id;
+    setSelectedElementId(newId);
+    setSelectedIds([newId]);
+    ipcService.createElement(newEl).catch(console.error);
+    return newId;
   };
+
+  const handleUploadImageForElement = useCallback((elementId: string, dataUrl: string) => {
+    recordHistory(elements);
+    const img = new Image();
+    img.onload = () => {
+      const aspect = (img.naturalWidth && img.naturalHeight) ? (img.naturalWidth / img.naturalHeight) : (340 / 220);
+      const currentEl = elements.find(x => x.id === elementId);
+      const cardW = currentEl?.width || 340;
+      const cardH = Math.max(80, Math.round(cardW / aspect));
+      handleContentChange(elementId, { ...(currentEl?.content || {}), url: dataUrl });
+      handleUpdateElementPositions([{ id: elementId, x: currentEl?.x || 100, y: currentEl?.y || 100, width: cardW, height: cardH, z_index: currentEl?.z_index || 10 }]);
+    };
+    img.src = dataUrl;
+  }, [elements, handleContentChange, handleUpdateElementPositions, recordHistory]);
 
   const handleAddImageFromDrawer = async (url: string, caption: string = '') => {
     recordHistory(elements);
@@ -831,6 +1253,7 @@ export const App: React.FC = () => {
     });
     setElements((prev) => [...prev, newEl]);
     setSelectedElementId(newEl.id);
+    setSelectedIds([newEl.id]);
   };
 
   const handleAddCommentPinToElement = async (targetId: string) => {
@@ -839,6 +1262,7 @@ export const App: React.FC = () => {
     const existingPin = elements.find((x) => x.element_type === 'comment' && Boolean(x.content?.is_pinned) && x.content?.pin_target_id === targetId);
     if (existingPin) {
       setSelectedElementId(existingPin.id);
+      setSelectedIds([existingPin.id]);
       return;
     }
     recordHistory(elements);
@@ -865,6 +1289,7 @@ export const App: React.FC = () => {
 
     setElements((prev) => [...prev, newEl]);
     setSelectedElementId(newEl.id);
+    setSelectedIds([newEl.id]);
   };
 
   const handleToggleLinkCaption = (linkId: string) => {
@@ -926,6 +1351,10 @@ export const App: React.FC = () => {
 
   return (
     <div className={`milanote-app-container ${isPresentationMode ? 'presentation-mode' : ''}`} onClick={() => setShowViewMenu(false)}>
+      {/* Top Status Bar Padding Band for Mobile on Root Board (Image 1) */}
+      {currentBoardId === 'root-board' && getDeviceCategory() === 'phone' && <div className="mobile-status-bar-filler" />}
+      {/* Top Status Bar Padding Band for Tablet under Android Status Bar */}
+      {getDeviceCategory() === 'tablet' && <div className="tablet-status-bar-filler" />}
       {isPresentationMode ? (
         <button className="exit-presentation-btn" onClick={() => setIsPresentationMode(false)} title="Exit Presentation Mode (Press Esc)">
           <Minimize2 size={16} /> Exit Presentation
@@ -933,25 +1362,78 @@ export const App: React.FC = () => {
       ) : (
         <>
           {/* FULL-WIDTH TOP HEADER BAR (PRIMARY) */}
-          <header className={`milanote-topbar ${currentBoardId !== 'root-board' ? 'no-border' : ''}`} onClick={(e) => e.stopPropagation()}>
+          <header className={`milanote-topbar ${boardHistory.length > 1 ? 'no-border' : ''}`} onClick={(e) => e.stopPropagation()}>
             <div className="topbar-left">
               <div className={`home-circle-logo ${dragHoverBoardId === 'root-board' ? 'drag-hover-highlight' : ''}`} title="Home" data-board-id="root-board" onClick={() => handleBreadcrumbClick(0)}>
                 <span>M</span>
               </div>
-              <nav className="breadcrumb-path">
-                {boardHistory.map((node, i) => (
-                  <React.Fragment key={node.id}>
-                    {i > 0 && <span style={{ color: 'rgba(255,255,255,0.2)', margin: '0 4px' }}>/</span>}
-                    <button
-                      data-board-id={node.id}
-                      className={`breadcrumb-item ${i === boardHistory.length - 1 ? 'active' : ''} ${dragHoverBoardId === node.id ? 'drag-hover-highlight' : ''}`}
-                      onClick={() => handleBreadcrumbClick(i)}
-                    >
-                      {node.title}
-                    </button>
-                  </React.Fragment>
-                ))}
-              </nav>
+
+              {/* Mobile back navigation button */}
+              {boardHistory.length > 1 && (
+                <button
+                  className="mobile-topbar-back-btn"
+                  onClick={() => handleBreadcrumbClick(Math.max(0, boardHistory.length - 2))}
+                  title="Back to parent board"
+                >
+                  <ArrowLeft size={18} />
+                </button>
+              )}
+
+              {/* Mobile compact title (strictly rendered only on phone screens) */}
+              {isPhoneScreen() && (
+                boardHistory.length > 1 ? (
+                  <input
+                    key={`mobile-title-${currentBoardId}`}
+                    type="text"
+                    className="mobile-board-title"
+                    value={boardHistory[boardHistory.length - 1]?.title || 'Board'}
+                    onChange={(e) => {
+                      const nextTitle = e.target.value;
+                      setBoardHistory((prev) => prev.map((node, i) => i === prev.length - 1 ? { ...node, title: nextTitle } : node));
+                    }}
+                    onBlur={async (e) => {
+                      const nextTitle = e.target.value || 'Untitled Board';
+                      setBoardHistory((prev) => prev.map((node, i) => i === prev.length - 1 ? { ...node, title: nextTitle } : node));
+                      try {
+                        await ipcService.updateBoard(currentBoardId, nextTitle);
+                        syncService.triggerSync().catch(() => {});
+                      } catch (err) {
+                        console.error('Failed to update board title in IPC:', err);
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === 'Escape') {
+                        e.currentTarget.blur();
+                      }
+                    }}
+                    title="Click to edit board title"
+                  />
+                ) : (
+                  <span
+                    className="mobile-board-title"
+                    style={{ display: 'inline-flex', alignItems: 'center' }}
+                  >
+                    {boardHistory[0]?.title || 'Home'}
+                  </span>
+                )
+              )}
+
+              <div className="board-switcher-container">
+                <nav className="breadcrumb-path">
+                  {boardHistory.map((node, i) => (
+                    <React.Fragment key={node.id}>
+                      {i > 0 && <span style={{ color: 'rgba(255,255,255,0.2)', margin: '0 4px' }}>/</span>}
+                      <button
+                        data-board-id={node.id}
+                        className={`breadcrumb-item ${i === boardHistory.length - 1 ? 'active' : ''} ${dragHoverBoardId === node.id ? 'drag-hover-highlight' : ''}`}
+                        onClick={() => handleBreadcrumbClick(i)}
+                      >
+                        {node.title}
+                      </button>
+                    </React.Fragment>
+                  ))}
+                </nav>
+              </div>
             </div>
 
             <div className="topbar-right">
@@ -981,13 +1463,15 @@ export const App: React.FC = () => {
               <button className="topbar-icon-btn" title="Mobile & Apps"><Smartphone size={17} /></button>
               <button className="topbar-icon-btn" title="Help & Guides"><HelpCircle size={17} /></button>
               <button className="topbar-icon-btn" title="Notifications"><Bell size={17} /></button>
-              <button className="topbar-icon-btn" title="Search"><SearchIcon size={17} /></button>
-              <button className="topbar-icon-btn" title="Settings & Profile"><Settings size={17} /></button>
+              <button className="topbar-icon-btn" title="Search (Ctrl+K)" onClick={() => setIsSearchOpen(true)}><SearchIcon size={17} /></button>
+              <button className="topbar-icon-btn mobile-unsorted-toggle-btn" title="Unsorted items" onClick={() => setIsUnsortedDrawerOpen((prev) => !prev)}><Folder size={17} /></button>
+              <SyncStatusIndicator onOpenSettings={() => setIsSyncSettingsOpen(true)} />
+              <button className="topbar-icon-btn" title="Settings & Profile" onClick={() => setIsSyncSettingsOpen(true)}><Settings size={17} /></button>
             </div>
           </header>
 
-          {/* SECONDARY BOARD TOPBAR (APPEARS ONLY WHEN WE ENTER A BOARD) */}
-          {currentBoardId !== 'root-board' && (
+          {/* SECONDARY BOARD TOPBAR (APPEARS ONLY WHEN WE ENTER A SUB-BOARD) */}
+          {boardHistory.length > 1 && (
             <header className="milanote-secondary-topbar" onClick={(e) => e.stopPropagation()}>
               <div className="secondary-topbar-left">
                 <span className="topbar-saved-status">Saved</span>
@@ -1006,12 +1490,11 @@ export const App: React.FC = () => {
                   onBlur={async (e) => {
                     const nextTitle = e.target.value || 'Untitled Board';
                     setBoardHistory((prev) => prev.map((node, i) => i === prev.length - 1 ? { ...node, title: nextTitle } : node));
-                    if (currentBoardId !== 'root-board') {
-                      try {
-                        await ipcService.updateElementContent(currentBoardId, { title: nextTitle });
-                      } catch (err) {
-                        console.error('Failed to update board title in IPC:', err);
-                      }
+                    try {
+                      await ipcService.updateBoard(currentBoardId, nextTitle);
+                      syncService.triggerSync().catch(() => {});
+                    } catch (err) {
+                      console.error('Failed to update board title in IPC:', err);
                     }
                   }}
                   onKeyDown={(e) => {
@@ -1036,7 +1519,7 @@ export const App: React.FC = () => {
                     className="secondary-topbar-btn dropdown-btn" 
                     onClick={(e) => { e.stopPropagation(); setShowViewMenu(!showViewMenu); }}
                   >
-                    View <ChevronDown size={14} />
+                    {Math.round(canvasScale * 100)}% <ChevronDown size={14} />
                   </button>
                 </div>
               </div>
@@ -1070,6 +1553,8 @@ export const App: React.FC = () => {
                 document.execCommand('justifyLeft', false, undefined);
               } else if (format === 'align-center' || format === 'align') {
                 document.execCommand('justifyCenter', false, undefined);
+              } else if (format === 'align-right') {
+                document.execCommand('justifyRight', false, undefined);
               } else if (format === 'heading' || format === 'small' || format === 'callout' || format === 'code-block' || format === 'quote') {
                 const editor = document.querySelector(`#milanote-el-${activeEditingElement?.id} .note-rich-editor`) as HTMLElement | null;
                 if (editor) {
@@ -1093,30 +1578,10 @@ export const App: React.FC = () => {
                       newSel.addRange(newRange);
                     }
                   } else {
-                    const sel = window.getSelection();
-                    
-                    if (sel) {
-                      const range = document.createRange();
-                      range.selectNodeContents(editor);
-                      sel.removeAllRanges();
-                      sel.addRange(range);
+                    if (document.activeElement !== editor && !editor.contains(document.activeElement)) {
+                      editor.focus();
                     }
-                    
-                    document.execCommand('formatBlock', false, blockTag);
-                    
-                    if (sel) {
-                        try {
-                            // Safely put cursor at the end of the newly formatted block
-                            const targetBlock = editor.firstElementChild || editor;
-                            const range = document.createRange();
-                            range.selectNodeContents(targetBlock);
-                            range.collapse(false); // collapse to end
-                            sel.removeAllRanges();
-                            sel.addRange(range);
-                        } catch(e) {
-                            sel.collapseToEnd();
-                        }
-                    }
+                    document.execCommand('formatBlock', false, `<${blockTag.toLowerCase()}>`);
                   }
                 }
               } else if (format === 'color' && param) {
@@ -1250,6 +1715,17 @@ export const App: React.FC = () => {
             onStyleChange={handleStyleChange}
             onAddCommentPin={handleAddCommentPinToElement}
             onToggleCaption={handleToggleImageCaption}
+            onUploadImage={(file) => {
+              if (activeSelectedImage) {
+                const reader = new FileReader();
+                reader.onload = () => {
+                  if (typeof reader.result === 'string') {
+                    handleUploadImageForElement(activeSelectedImage.id, reader.result);
+                  }
+                };
+                reader.readAsDataURL(file);
+              }
+            }}
           />
         ) : activeSelectedLine ? (
           <LineActionSidebar
@@ -1311,6 +1787,7 @@ export const App: React.FC = () => {
           onSelectTableCells={setSelectedTableCells}
           onSelectElement={(id) => {
             setSelectedElementId(id);
+            setSelectedIds(id ? [id] : []);
             if (id !== renamingLinkId) setRenamingLinkId(null);
             if (id && editingElementId !== id) {
               setEditingElementId(null);
@@ -1323,6 +1800,7 @@ export const App: React.FC = () => {
           }}
           onMultiSelect={(ids) => {
             setSelectedIds(ids);
+            setSelectedElementId(ids.length > 0 ? ids[ids.length - 1] : null);
             if (ids.length > 0 && editingElementId) {
               setEditingElementId(null);
             }
@@ -1332,20 +1810,54 @@ export const App: React.FC = () => {
           onUpdateElementPositions={handleUpdateElementPositions}
           onContentChange={handleContentChange}
           onStyleChange={handleStyleChange}
-          onContextMenu={(e, element, canvasPos, tableSubTarget) => setContextMenu({ x: e.clientX, y: e.clientY, canvasX: canvasPos?.x, canvasY: canvasPos?.y, element, tableSubTarget })}
+          onContextMenu={(e, element, canvasPos, tableSubTarget) => {
+            if (getDeviceCategory() === 'phone') return;
+            setContextMenu({ x: e.clientX, y: e.clientY, canvasX: canvasPos?.x, canvasY: canvasPos?.y, element, tableSubTarget });
+          }}
           onOpenBoard={handleOpenBoard}
           onMoveElementToBoard={handleMoveElementToBoard}
           onHoverBoard={setDragHoverBoardId}
-          isPresentationMode={isPresentationMode}
+          activeTool={activeTool}
+          onSelectTool={setActiveTool}
           onDropTool={handleDropTool}
           onCreateTaskListFromItem={handleCreateTaskListFromItem}
           onCreateQuickLine={handleCreateQuickLine}
           onDeleteElement={handleDelete}
+          onDuplicateElement={handleDuplicate}
+          onCopyElement={handleCopy}
+          onToggleLockElement={handleToggleLock}
+          onRecolorElement={handleRecolor}
           onSetHoveringTrash={setIsHoveringTrash}
           isHoveringTrash={isHoveringTrash}
           onDragChange={setIsElementBeingDragged}
           scale={canvasScale}
           onSetScale={setCanvasScale}
+          onMinScaleChange={setMinCanvasScale}
+          onCanvasClick={handleCanvasClick}
+          onTwoFingerTap={(cx, cy, clientX, clientY, targetEl) => {
+            if (getDeviceCategory() === 'phone') {
+              setTwoFingerMenu({ canvasX: cx, canvasY: cy });
+            } else {
+              const activeEl = targetEl || (selectedElementId ? elements.find(x => x.id === selectedElementId) : null) || null;
+              if (activeEl) {
+                setSelectedElementId(activeEl.id);
+                if (!selectedIds.includes(activeEl.id)) {
+                  setSelectedIds([activeEl.id]);
+                }
+              }
+              const menuX = clientX !== undefined ? Math.min(clientX, window.innerWidth - 260) : Math.round(window.innerWidth / 2 - 130);
+              const menuY = clientY !== undefined ? Math.min(clientY, window.innerHeight - 380) : Math.round(window.innerHeight / 2 - 200);
+              setContextMenu({
+                x: Math.max(10, menuX),
+                y: Math.max(10, menuY),
+                canvasX: cx,
+                canvasY: cy,
+                element: activeEl,
+                tableSubTarget: undefined,
+              });
+            }
+          }}
+          onUploadImageForElement={handleUploadImageForElement}
         />
 
               {/* FLOATING TOP-RIGHT UNSORTED PILL BUTTON */}
@@ -1372,15 +1884,15 @@ export const App: React.FC = () => {
             <p className="view-popover-sub">Tip: hold ctrl and use mouse wheel to zoom</p>
             
             <div className="zoom-slider-row">
-              <button className="zoom-popover-icon-btn" onClick={() => setCanvasScale(s => Math.max(0.25, Number((s - 0.15).toFixed(2))))} title="Zoom Out">–</button>
+              <button className="zoom-popover-icon-btn" onClick={() => setCanvasScale(s => Math.max(minCanvasScale, Number((s - 0.15).toFixed(2))))} title="Zoom Out">–</button>
               <div className="zoom-slider-track">
-                <div className="zoom-slider-fill" style={{ width: `${Math.min(100, Math.max(0, ((canvasScale - 0.25) / (3 - 0.25)) * 100))}%` }} />
+                <div className="zoom-slider-fill" style={{ width: `${Math.min(100, Math.max(0, ((canvasScale - minCanvasScale) / (3.0 - minCanvasScale)) * 100))}%` }} />
               </div>
               <span className="zoom-percentage-badge" onClick={() => setCanvasScale(1.0)} title="Click to reset to 100%">{Math.round(canvasScale * 100)}%</span>
               <button className="zoom-popover-icon-btn" onClick={() => setCanvasScale(s => Math.min(3.0, Number((s + 0.15).toFixed(2))))} title="Zoom In">+</button>
             </div>
 
-            <button className="zoom-scale-to-fit-btn" onClick={() => setCanvasScale(1.0)}>
+            <button className="zoom-scale-to-fit-btn" onClick={handleScaleToFit}>
               Scale to fit
             </button>
           </div>
@@ -1426,6 +1938,190 @@ export const App: React.FC = () => {
           onCreateBoardShortcut={handleCreateBoardShortcut}
         />
       )}
+
+      {/* Global Search Modal (Task 3.7) */}
+      <SearchModal
+        isOpen={isSearchOpen}
+        onClose={() => setIsSearchOpen(false)}
+        onSelectResult={(boardId, elementId) => {
+          handleSwitchBoard(boardId, undefined, false);
+          if (elementId) {
+            setTimeout(() => {
+              setSelectedElementId(elementId);
+              setSelectedIds([elementId]);
+            }, 80);
+          }
+        }}
+      />
+
+      {/* NATIVE MILANOTE MOBILE BOARD TOP BAR (IMAGE 2) */}
+      {boardHistory.length > 1 && (
+        <header className="mobile-board-topbar" onClick={(e) => e.stopPropagation()}>
+          <button
+            className="mobile-board-back-icon-btn"
+            onClick={() => handleBreadcrumbClick(Math.max(0, boardHistory.length - 2))}
+            title="Back to previous board"
+          >
+            <ChevronLeft size={26} strokeWidth={2.2} />
+          </button>
+
+          <div className="mobile-board-title-container">
+            <input
+              type="text"
+              className="mobile-board-header-title"
+              value={boardHistory[boardHistory.length - 1]?.title || 'New Board'}
+              onChange={(e) => {
+                const nextTitle = e.target.value;
+                setBoardHistory((prev) => prev.map((node, i) => i === prev.length - 1 ? { ...node, title: nextTitle } : node));
+              }}
+              onBlur={async (e) => {
+                const nextTitle = e.target.value || 'Untitled Board';
+                setBoardHistory((prev) => prev.map((node, i) => i === prev.length - 1 ? { ...node, title: nextTitle } : node));
+                try {
+                  await ipcService.updateBoard(currentBoardId, nextTitle);
+                  syncService.triggerSync().catch(() => {});
+                } catch (err) {
+                  console.error('Failed to update board title in IPC:', err);
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === 'Escape') {
+                  e.currentTarget.blur();
+                }
+              }}
+              title="Click to edit board title"
+            />
+          </div>
+
+          <SyncStatusIndicator dropdownAlign="right" onOpenSettings={() => setIsSyncSettingsOpen(true)} />
+          <button
+            className="mobile-board-share-btn"
+            title="Share board"
+            onClick={() => {
+              if (typeof navigator !== 'undefined' && 'share' in navigator) {
+                try {
+                  navigator.share({
+                    title: boardHistory[boardHistory.length - 1]?.title || 'Board',
+                    url: window.location.href,
+                  }).catch(() => {});
+                } catch (_) {}
+              }
+            }}
+          >
+            <UserPlus size={18} strokeWidth={2} />
+          </button>
+        </header>
+      )}
+
+      {/* Native Milanote Mobile Bottom Bar (Screens 1, 2, 3, 4, 5) */}
+      <MobileBottomBar
+        currentBoardId={currentBoardId}
+        isRootBoard={boardHistory.length === 1}
+        boardTitle={boardHistory[boardHistory.length - 1]?.title || 'Board'}
+        unsortedCount={elements.filter(el => Boolean(el.style?.is_unsorted) && el.element_type !== 'line').length}
+        onOpenUnsorted={() => setIsUnsortedDrawerOpen(prev => !prev)}
+        onOpenBoardsMenu={() => {
+          setIsUnsortedDrawerOpen(false);
+        }}
+        canUndo={undoStack.length > 0}
+        canRedo={redoStack.length > 0}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
+        onOpenSearch={() => setIsSearchOpen(true)}
+        activeTool={activeTool}
+        onSelectTool={setActiveTool}
+        onDropToolAtScreen={handleDropToolAtScreen}
+        isUnsortedOpen={isUnsortedDrawerOpen}
+        onMoveElementToCanvas={handleMoveUnsortedElementToCanvasCenter}
+        onMoveElementToUnsorted={handleMoveToUnsorted}
+        selectedElement={elements.find(x => x.id === selectedElementId) || null}
+        selectedIds={selectedIds}
+        onDeselect={() => {
+          setSelectedElementId(null);
+          setSelectedIds([]);
+          setEditingElementId(null);
+          setSelectedTableCells(null);
+        }}
+        onRecolor={handleRecolor}
+        onCut={handleCut}
+        onCopy={handleCopy}
+        onDuplicate={handleDuplicate}
+        onDelete={() => handleDelete()}
+        onToggleLock={handleToggleLock}
+        onBringToFront={handleBringToFront}
+        onSendToBack={handleSendToBack}
+        onAddCommentPin={handleAddCommentPinToElement}
+        onToggleTaskTitle={handleToggleTaskTitle}
+        onSetTaskDueDate={handleSetTaskDueDate}
+        onToggleCaption={(id) => {
+          const el = elements.find(x => x.id === id);
+          if (el?.element_type === 'image') handleToggleImageCaption(id);
+          else handleToggleLinkCaption(id);
+        }}
+        onRename={(id) => {
+          const el = elements.find(x => x.id === id);
+          if (el?.element_type === 'link') setRenamingLinkId(id);
+          else setEditingElementId(id);
+        }}
+        onSetIcon={handleSetBoardIcon}
+        resetTrigger={resetMobileBarTrigger}
+        editingElement={activeEditingElement}
+        onDoneEditing={() => setEditingElementId(null)}
+        onStyleChange={handleStyleChange}
+        onContentChange={handleContentChange}
+        selectedTableCells={selectedTableCells}
+        onDeselectTableCells={() => setSelectedTableCells(null)}
+        onUploadImageForElement={handleUploadImageForElement}
+        onOpenSyncSettings={() => setIsSyncSettingsOpen(true)}
+      />
+
+      {/* Two-Finger Tap Context Menu Sheet (Phone only) */}
+      {twoFingerMenu && getDeviceCategory() === 'phone' && (
+        <div
+          className="mobile-context-sheet-backdrop"
+          onClick={() => setTwoFingerMenu(null)}
+        >
+          <div
+            className="mobile-two-finger-sheet"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              className={`mobile-context-sheet-item ${undoStack.length === 0 ? 'disabled' : ''}`}
+              onClick={() => {
+                handleUndo();
+                setTwoFingerMenu(null);
+              }}
+            >
+              <span>Undo</span>
+            </button>
+            <button
+              className={`mobile-context-sheet-item ${clipboardElements.length === 0 ? 'disabled' : ''}`}
+              onClick={() => {
+                handlePaste(twoFingerMenu.canvasX, twoFingerMenu.canvasY);
+                setTwoFingerMenu(null);
+              }}
+            >
+              <span>Paste</span>
+            </button>
+            <button
+              className="mobile-context-sheet-item"
+              onClick={() => {
+                handleSelectAll();
+                setTwoFingerMenu(null);
+              }}
+            >
+              <span>Select All</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Sync Settings & Pairing Modal (Phase 5) */}
+      <SyncSettingsModal
+        isOpen={isSyncSettingsOpen}
+        onClose={() => setIsSyncSettingsOpen(false)}
+        onSyncApplied={refreshCurrentBoardElements}
+      />
     </div>
   );
 };

@@ -1,12 +1,19 @@
 import React, { useState, useEffect } from 'react';
 import { Search, X, Folder, FileText, ArrowUpRight } from 'lucide-react';
-import { SearchResult } from '../types';
+import { SearchResult, BoardTreeNode } from '../types';
 import { ipcService } from '../services/ipc';
 
 interface SearchModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSelectResult: (boardId: string, elementId: string | null) => void;
+}
+
+interface FlatBoard {
+  id: string;
+  title: string;
+  depth: number;
+  isRoot: boolean;
 }
 
 export const SearchModal: React.FC<SearchModalProps> = ({
@@ -16,6 +23,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
 }) => {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
+  const [boards, setBoards] = useState<FlatBoard[]>([]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -24,6 +32,32 @@ export const SearchModal: React.FC<SearchModalProps> = ({
       setResults([]);
       return;
     }
+
+    const loadWorkspaceBoards = async () => {
+      try {
+        const tree = await ipcService.getBoardTree();
+        const flat: FlatBoard[] = [];
+        const traverse = (nodes: BoardTreeNode[], depth: number) => {
+          for (const node of nodes) {
+            flat.push({
+              id: node.board.id,
+              title: node.board.title || 'Untitled Board',
+              depth,
+              isRoot: node.board.parent_board_id === null,
+            });
+            if (node.children) {
+              traverse(node.children, depth + 1);
+            }
+          }
+        };
+        traverse(tree, 0);
+        setBoards(flat);
+      } catch (err) {
+        console.error('Failed to load workspace boards for search modal:', err);
+      }
+    };
+
+    loadWorkspaceBoards();
   }, [isOpen]);
 
   useEffect(() => {
@@ -82,7 +116,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
             </div>
           )}
 
-          {!loading && results.map((item, idx) => (
+          {!loading && query && results.map((item, idx) => (
             <div
               key={`${item.board_id}-${item.element_id || idx}`}
               className="search-item"
@@ -107,6 +141,40 @@ export const SearchModal: React.FC<SearchModalProps> = ({
               )}
             </div>
           ))}
+
+          {!loading && !query && (
+            <div>
+              <div style={{ padding: '8px 16px 4px 16px', fontSize: '11px', fontWeight: 700, color: 'var(--milanote-text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                Workspace Boards ({boards.length})
+              </div>
+              {boards.map((b) => (
+                <div
+                  key={b.id}
+                  className="search-item"
+                  style={{ paddingLeft: `${16 + b.depth * 16}px` }}
+                  onClick={() => {
+                    onSelectResult(b.id, null);
+                    onClose();
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '8px', fontWeight: '600', fontSize: '13px', color: 'var(--milanote-text-primary)' }}>
+                      <Folder size={15} color="var(--milanote-accent)" />
+                      {b.title}
+                      {b.isRoot && (
+                        <span style={{ fontSize: '10px', background: 'rgba(255,255,255,0.08)', padding: '2px 6px', borderRadius: '4px', color: 'var(--milanote-text-muted)' }}>
+                          Root
+                        </span>
+                      )}
+                    </span>
+                    <span style={{ fontSize: '11px', color: 'var(--milanote-text-muted)', textTransform: 'uppercase', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                      Open <ArrowUpRight size={13} />
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>

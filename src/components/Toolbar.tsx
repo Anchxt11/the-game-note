@@ -21,7 +21,9 @@ import {
   MapPin,
   Video,
   Type,
-  Search
+  Search,
+  Plus,
+  X
 } from 'lucide-react';
 
 interface ToolbarProps {
@@ -66,6 +68,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   const [showImageDrawer, setShowImageDrawer] = useState(false);
   const [activeImageTab, setActiveImageTab] = useState<'recommended' | 'core' | 'mechanics' | 'upload'>('upload');
   const [pexelsQuery, setPexelsQuery] = useState('');
+  const [isMobileSheetOpen, setIsMobileSheetOpen] = useState(false);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -180,7 +183,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   }, [activeImageTab, pexelsQuery]);
 
   return (
-    <aside className="milanote-toolbar" ref={toolbarRef} onClick={(e) => e.stopPropagation()}>
+    <>
+      <aside className="milanote-toolbar" ref={toolbarRef} onClick={(e) => e.stopPropagation()}>
       {/* Primary Tool Stack */}
       <div className="toolbar-section">
         {primaryTools.map(({ id, icon: Icon, label }) => (
@@ -188,13 +192,13 @@ export const Toolbar: React.FC<ToolbarProps> = ({
             key={id}
             className={`toolbar-tool-btn ${activeTool === id ? 'active' : ''}`}
             onClick={() => {
-              onSelectTool(id);
+              onSelectTool(activeTool === id ? 'select' : id);
               setShowMoreTools(false);
               setShowImageDrawer(false);
             }}
             draggable
             onDragStart={(e) => handleToolDragStart(e, id)}
-            title={`Add ${label} (Drag to canvas or click)`}
+            title={`Add ${label} (Tap to place, or drag to canvas)`}
           >
             <Icon size={20} />
             <span className="tool-label">{label}</span>
@@ -232,7 +236,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                 setShowImageDrawer(!showImageDrawer);
                 setShowMoreTools(false);
               } else {
-                onSelectTool(id);
+                onSelectTool(activeTool === id ? 'select' : id);
                 setShowMoreTools(false);
                 setShowImageDrawer(false);
               }
@@ -274,7 +278,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
                   handleToolDragStart(e, id);
                 }}
                 onClick={() => {
-                  onSelectTool(id);
+                  onSelectTool(activeTool === id ? 'select' : id);
                   setShowMoreTools(false);
                 }}
               >
@@ -422,5 +426,90 @@ export const Toolbar: React.FC<ToolbarProps> = ({
         </div>
       )}
     </aside>
+
+    {/* MOBILE PHONE TOOL FAB & BOTTOM SHEET (TASK 3.2) */}
+    <div className="mobile-tool-fab-container" onClick={(e) => e.stopPropagation()}>
+      <button
+        className={`mobile-tool-fab ${isMobileSheetOpen || (activeTool && activeTool !== 'select') ? 'active' : ''}`}
+        onClick={() => setIsMobileSheetOpen(!isMobileSheetOpen)}
+        title="Add element to board"
+        aria-label="Add element to board"
+      >
+        {isMobileSheetOpen ? <X size={24} /> : <Plus size={24} />}
+      </button>
+
+      {isMobileSheetOpen && (
+        <div className="mobile-tool-sheet-overlay" onClick={() => setIsMobileSheetOpen(false)}>
+          <div className="mobile-tool-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="sheet-drag-handle" />
+            <div className="mobile-tool-sheet-header">
+              <h3>Add to board</h3>
+              <button 
+                className="mobile-sheet-close-btn" 
+                onClick={() => setIsMobileSheetOpen(false)}
+                title="Close"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="mobile-tool-sheet-grid">
+              {primaryTools.map(({ id, icon: Icon, label }) => (
+                <button
+                  key={`mobile-${id}`}
+                  className={`mobile-tool-tile ${activeTool === id ? 'active' : ''}`}
+                  onClick={() => {
+                    onSelectTool(id);
+                    setIsMobileSheetOpen(false);
+                  }}
+                >
+                  <div className="mobile-tool-tile-icon">
+                    <Icon size={22} />
+                  </div>
+                  <span>{label}</span>
+                </button>
+              ))}
+
+              {secondaryTools.map(({ id, icon: Icon, label }) => (
+                <button
+                  key={`mobile-${id}`}
+                  className={`mobile-tool-tile ${activeTool === id ? 'active' : ''}`}
+                  onClick={() => {
+                    if (id === 'image' || id === 'upload') {
+                      setShowImageDrawer(true);
+                    } else {
+                      onSelectTool(id);
+                    }
+                    setIsMobileSheetOpen(false);
+                  }}
+                >
+                  <div className="mobile-tool-tile-icon">
+                    <Icon size={22} />
+                  </div>
+                  <span>{label}</span>
+                </button>
+              ))}
+
+              {moreToolsGrid.map(({ id, icon: Icon, label, badgeColor }) => (
+                <button
+                  key={`mobile-${id}`}
+                  className={`mobile-tool-tile ${activeTool === id ? 'active' : ''}`}
+                  onClick={() => {
+                    onSelectTool(id);
+                    setIsMobileSheetOpen(false);
+                  }}
+                >
+                  <div className="mobile-tool-tile-icon" style={{ background: badgeColor, color: '#ffffff' }}>
+                    <Icon size={20} />
+                  </div>
+                  <span>{label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  </>
   );
 };

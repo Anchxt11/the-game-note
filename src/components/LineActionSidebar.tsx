@@ -97,15 +97,17 @@ export const LineActionSidebar: React.FC<LineActionSidebarProps> = ({
               {CLASSIC_STRIP_COLORS.map((col, idx) => {
                 const isSelected = activeColor === col;
                 return (
-                  <div
+                  <button
                     key={idx}
+                    type="button"
                     className={`color-swatch-box ${isSelected ? 'selected' : ''}`}
-                    style={{ backgroundColor: '#353c48' }}
+                    style={{ backgroundColor: '#353c48', border: 'none', padding: 0, cursor: 'pointer' }}
+                    onPointerDown={(e) => { e.stopPropagation(); handleColorSelect(col); }}
                     onClick={() => handleColorSelect(col)}
                     title={col}
                   >
                     <div className="color-swatch-top-strip-preview" style={{ backgroundColor: col, height: '100%' }} />
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -116,15 +118,17 @@ export const LineActionSidebar: React.FC<LineActionSidebarProps> = ({
               {PASTEL_STRIP_COLORS.map((col, idx) => {
                 const isSelected = activeColor === col;
                 return (
-                  <div
+                  <button
                     key={idx}
+                    type="button"
                     className={`color-swatch-box ${isSelected ? 'selected' : ''}`}
-                    style={{ backgroundColor: '#353c48' }}
+                    style={{ backgroundColor: '#353c48', border: 'none', padding: 0, cursor: 'pointer' }}
+                    onPointerDown={(e) => { e.stopPropagation(); handleColorSelect(col); }}
                     onClick={() => handleColorSelect(col)}
                     title={col}
                   >
                     <div className="color-swatch-top-strip-preview" style={{ backgroundColor: col, height: '100%' }} />
-                  </div>
+                  </button>
                 );
               })}
             </div>

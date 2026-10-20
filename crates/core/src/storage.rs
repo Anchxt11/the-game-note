@@ -5,11 +5,17 @@ use uuid::Uuid;
 
 use crate::error::{AppError, Result};
 
+#[derive(Debug, Clone)]
 pub struct FileStorage {
     root_dir: PathBuf,
 }
 
 impl FileStorage {
+    /// Opens the file storage at the default desktop location using `directories::ProjectDirs`.
+    ///
+    /// NOTE: Do not call this on mobile/Android as `ProjectDirs` cannot resolve the
+    /// application directory. Mobile/Tauri hosts should resolve the directory via Tauri's
+    /// path API (`app.path().app_data_dir()`) and call [`FileStorage::open_dir`] instead.
     pub fn open_default() -> Result<Self> {
         let proj_dirs = ProjectDirs::from("com", "anchit", "gameNote")
             .ok_or_else(|| AppError::InvalidOperation("Failed to determine project data directory".into()))?;
@@ -49,6 +55,10 @@ impl FileStorage {
         let dest_path = self.root_dir.join(&unique_filename);
         fs::write(&dest_path, bytes)?;
         Ok(unique_filename)
+    }
+
+    pub fn root_dir(&self) -> &Path {
+        &self.root_dir
     }
 
     pub fn get_file_path(&self, filename: &str) -> PathBuf {

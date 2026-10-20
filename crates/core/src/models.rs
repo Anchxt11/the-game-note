@@ -92,7 +92,7 @@ pub struct TaskListItem {
     pub element_id: Uuid,
     pub text: String,
     pub is_checked: bool,
-    pub order_index: i32,
+    pub order_index: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

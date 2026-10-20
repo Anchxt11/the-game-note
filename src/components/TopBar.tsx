@@ -14,6 +14,7 @@ import {
   FolderOpen
 } from 'lucide-react';
 import { Board } from '../types';
+import { SyncStatusIndicator } from './SyncStatusIndicator';
 
 interface TopBarProps {
   currentBoard: Board | null;
@@ -31,6 +32,7 @@ interface TopBarProps {
   unsortedCount: number;
   onToggleUnsorted: () => void;
   isUnsortedOpen: boolean;
+  onOpenSyncSettings?: () => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -48,7 +50,8 @@ export const TopBar: React.FC<TopBarProps> = ({
   onOpenSearch,
   unsortedCount,
   onToggleUnsorted,
-  isUnsortedOpen
+  isUnsortedOpen,
+  onOpenSyncSettings,
 }) => {
   return (
     <header className="milanote-header">
@@ -140,10 +143,16 @@ export const TopBar: React.FC<TopBarProps> = ({
 
         <div className="header-divider" />
 
+        <SyncStatusIndicator onOpenSettings={onOpenSyncSettings || (() => {})} />
+
         <button className="header-btn icon-only" title="Help & Documentation">
           <HelpCircle size={18} />
         </button>
-        <button className="header-btn icon-only" title="Workspace Settings">
+        <button 
+          className="header-btn icon-only" 
+          title="Sync & Workspace Settings"
+          onClick={onOpenSyncSettings}
+        >
           <Settings size={18} />
         </button>
 

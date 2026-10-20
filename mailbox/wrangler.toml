@@ -1,0 +1,13 @@
+name = "gamenote-mailbox"
+main = "src/index.ts"
+compatibility_date = "2024-10-01"
+compatibility_flags = ["nodejs_compat"]
+
+[durable_objects]
+bindings = [
+  { name = "MAILBOX_DO", class_name = "MailboxDurableObject" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MailboxDurableObject"]

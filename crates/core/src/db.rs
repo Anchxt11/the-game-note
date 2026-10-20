@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use chrono::Utc;
 use directories::ProjectDirs;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -11,11 +11,287 @@ use crate::models::{
     TaskListItem,
 };
 
+#[derive(Clone)]
 pub struct Database {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
+}
+
+pub fn find_crsqlite_path() -> std::path::PathBuf {
+    #[cfg(target_os = "android")]
+    {
+        return std::path::PathBuf::from("libcrsqlite.so");
+    }
+
+    #[cfg(not(target_os = "android"))]
+    {
+        if let Ok(path_str) = std::env::var("CRSQLITE_PATH") {
+            let p = std::path::PathBuf::from(path_str);
+            if p.exists() {
+                return p;
+            }
+        }
+
+        let arch = if cfg!(target_arch = "aarch64") {
+            "arm64-v8a"
+        } else {
+            "x86_64"
+        };
+
+        // Relative to compile-time manifest dir (cargo tests and development)
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let manifest_p1 = std::path::Path::new(manifest_dir)
+            .join("libs")
+            .join(arch)
+            .join("libcrsqlite.so");
+        if manifest_p1.exists() {
+            return manifest_p1;
+        }
+        let manifest_p2 = std::path::Path::new(manifest_dir)
+            .join("libs")
+            .join(arch)
+            .join("crsqlite.so");
+        if manifest_p2.exists() {
+            return manifest_p2;
+        }
+
+        // Executable parent directory
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(parent) = exe.parent() {
+                let p1 = parent.join("libcrsqlite.so");
+                if p1.exists() {
+                    return p1;
+                }
+                let p2 = parent.join("crsqlite.so");
+                if p2.exists() {
+                    return p2;
+                }
+            }
+        }
+
+        // Relative to current working dir
+        let cwd_p1 = std::path::Path::new("crates/core/libs")
+            .join(arch)
+            .join("libcrsqlite.so");
+        if cwd_p1.exists() {
+            return cwd_p1;
+        }
+
+        std::path::PathBuf::from("libcrsqlite.so")
+    }
+}
+
+pub fn load_crsqlite(conn: &Connection) -> Result<()> {
+    let path = find_crsqlite_path();
+    let _guard = unsafe { rusqlite::LoadExtensionGuard::new(conn)? };
+    unsafe {
+        conn.load_extension(&path, Some("sqlite3_crsqlite_init"))?;
+    }
+    Ok(())
+}
+
+fn needs_schema_migration(conn: &Connection) -> Result<bool> {
+    for table in &["boards", "elements", "task_list_items", "connectors"] {
+        let table_exists: bool = conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            params![table],
+            |r| Ok(r.get::<_, i64>(0)? > 0),
+        )?;
+        if table_exists {
+            let fk_count: i64 = conn.query_row(
+                &format!("SELECT count(*) FROM pragma_foreign_key_list('{}')", table),
+                [],
+                |r| r.get(0),
+            )?;
+            if fk_count > 0 {
+                return Ok(true);
+            }
+
+            let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+            let mut id_notnull = false;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let name: String = row.get(1)?;
+                let notnull: i32 = row.get(3)?;
+                let dflt_value: Option<String> = row.get(4)?;
+                let pk: i32 = row.get(5)?;
+                if name == "id" {
+                    id_notnull = notnull == 1;
+                }
+                if notnull == 1 && dflt_value.is_none() && pk == 0 {
+                    return Ok(true);
+                }
+                if *table == "task_list_items" && name == "order_index" {
+                    let col_type: String = row.get(2)?;
+                    if col_type.to_uppercase().contains("INT") {
+                        return Ok(true);
+                    }
+                }
+            }
+            if !id_notnull {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn migrate_legacy_tables(conn: &Connection) -> Result<()> {
+    conn.execute("PRAGMA foreign_keys = OFF;", [])?;
+
+    // 1. Boards
+    let boards_exists: bool = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='boards'",
+        [],
+        |r| Ok(r.get::<_, i64>(0)? > 0),
+    )?;
+    if boards_exists {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS boards_v2 (
+                id TEXT NOT NULL PRIMARY KEY,
+                parent_board_id TEXT,
+                title TEXT NOT NULL DEFAULT '',
+                color_theme TEXT,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+            INSERT OR IGNORE INTO boards_v2 SELECT id, parent_board_id, title, color_theme, created_at, updated_at FROM boards;
+            DROP TABLE boards;
+            ALTER TABLE boards_v2 RENAME TO boards;
+            CREATE INDEX IF NOT EXISTS idx_boards_parent ON boards(parent_board_id);
+            "#,
+        )?;
+    }
+
+    // 2. Elements
+    let elements_exists: bool = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='elements'",
+        [],
+        |r| Ok(r.get::<_, i64>(0)? > 0),
+    )?;
+    if elements_exists {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS elements_v2 (
+                id TEXT NOT NULL PRIMARY KEY,
+                board_id TEXT NOT NULL DEFAULT '',
+                element_type TEXT NOT NULL DEFAULT 'note',
+                x REAL NOT NULL DEFAULT 0,
+                y REAL NOT NULL DEFAULT 0,
+                width REAL NOT NULL DEFAULT 0,
+                height REAL NOT NULL DEFAULT 0,
+                z_index INTEGER NOT NULL DEFAULT 0,
+                content TEXT NOT NULL DEFAULT '{}',
+                style TEXT,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+            INSERT OR IGNORE INTO elements_v2 SELECT id, board_id, element_type, x, y, width, height, z_index, content, style, created_at, updated_at FROM elements;
+            DROP TABLE elements;
+            ALTER TABLE elements_v2 RENAME TO elements;
+            CREATE INDEX IF NOT EXISTS idx_elements_board ON elements(board_id);
+            "#,
+        )?;
+    }
+
+    // 3. Task List Items
+    let tasks_exists: bool = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='task_list_items'",
+        [],
+        |r| Ok(r.get::<_, i64>(0)? > 0),
+    )?;
+    if tasks_exists {
+        let mut stmt = conn.prepare("SELECT id, element_id, text, is_checked, order_index FROM task_list_items ORDER BY element_id, order_index ASC")?;
+        struct OldTask {
+            id: String,
+            element_id: String,
+            text: String,
+            is_checked: i32,
+        }
+        let rows = stmt.query_map([], |row| {
+            Ok(OldTask {
+                id: row.get(0)?,
+                element_id: row.get(1)?,
+                text: row.get(2)?,
+                is_checked: row.get(3)?,
+            })
+        })?;
+
+        let mut old_tasks_by_element: std::collections::HashMap<String, Vec<OldTask>> = std::collections::HashMap::new();
+        for r in rows {
+            let task = r?;
+            old_tasks_by_element.entry(task.element_id.clone()).or_default().push(task);
+        }
+
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS task_list_items_v2 (
+                id TEXT NOT NULL PRIMARY KEY,
+                element_id TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL DEFAULT '',
+                is_checked INTEGER NOT NULL DEFAULT 0,
+                order_index TEXT NOT NULL DEFAULT 'a0'
+            );
+            "#,
+        )?;
+
+        let mut insert_stmt = conn.prepare(
+            "INSERT INTO task_list_items_v2 (id, element_id, text, is_checked, order_index) VALUES (?1, ?2, ?3, ?4, ?5)"
+        )?;
+
+        for (_el_id, tasks) in old_tasks_by_element {
+            let count = tasks.len();
+            let keys = crate::fractional_index::generate_n_keys_between(None, None, count)
+                .unwrap_or_else(|_| (0..count).map(|i| format!("a{}", i)).collect());
+            for (idx, task) in tasks.into_iter().enumerate() {
+                let frac_key = keys.get(idx).cloned().unwrap_or_else(|| format!("a{}", idx));
+                insert_stmt.execute(params![task.id, task.element_id, task.text, task.is_checked, frac_key])?;
+            }
+        }
+
+        conn.execute_batch(
+            r#"
+            DROP TABLE task_list_items;
+            ALTER TABLE task_list_items_v2 RENAME TO task_list_items;
+            CREATE INDEX IF NOT EXISTS idx_tasks_element ON task_list_items(element_id, order_index);
+            "#,
+        )?;
+    }
+
+    // 4. Connectors
+    let connectors_exists: bool = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='connectors'",
+        [],
+        |r| Ok(r.get::<_, i64>(0)? > 0),
+    )?;
+    if connectors_exists {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS connectors_v2 (
+                id TEXT NOT NULL PRIMARY KEY,
+                board_id TEXT NOT NULL DEFAULT '',
+                from_element_id TEXT NOT NULL DEFAULT '',
+                to_element_id TEXT NOT NULL DEFAULT '',
+                style TEXT
+            );
+            INSERT OR IGNORE INTO connectors_v2 SELECT id, board_id, from_element_id, to_element_id, style FROM connectors;
+            DROP TABLE connectors;
+            ALTER TABLE connectors_v2 RENAME TO connectors;
+            CREATE INDEX IF NOT EXISTS idx_connectors_board ON connectors(board_id);
+            "#,
+        )?;
+    }
+
+    conn.execute("PRAGMA foreign_keys = ON;", [])?;
+    Ok(())
 }
 
 impl Database {
+    /// Opens the database at the default desktop location using `directories::ProjectDirs`.
+    ///
+    /// NOTE: Do not call this on mobile/Android as `ProjectDirs` cannot resolve the
+    /// application directory. Mobile/Tauri hosts should resolve the directory via Tauri's
+    /// path API (`app.path().app_data_dir()`) and call [`Database::open_path`] instead.
     pub fn open_default() -> Result<Self> {
         let proj_dirs = ProjectDirs::from("com", "anchit", "gameNote")
             .ok_or_else(|| AppError::InvalidOperation("Failed to determine project data directory".into()))?;
@@ -28,8 +304,9 @@ impl Database {
 
     pub fn open_path<P: AsRef<std::path::Path>>(path: P) -> Result<Self> {
         let conn = Connection::open(path)?;
+        load_crsqlite(&conn)?;
         let db = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         db.init_schema()?;
         Ok(db)
@@ -37,8 +314,9 @@ impl Database {
 
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
+        load_crsqlite(&conn)?;
         let db = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         db.init_schema()?;
         Ok(db)
@@ -46,6 +324,10 @@ impl Database {
 
     fn init_schema(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
+
+        if needs_schema_migration(&conn)? {
+            migrate_legacy_tables(&conn)?;
+        }
         
         conn.execute_batch(
             r#"
@@ -54,50 +336,87 @@ impl Database {
             PRAGMA synchronous = NORMAL;
 
             CREATE TABLE IF NOT EXISTS boards (
-                id TEXT PRIMARY KEY,
-                parent_board_id TEXT REFERENCES boards(id) ON DELETE CASCADE,
-                title TEXT NOT NULL,
+                id TEXT NOT NULL PRIMARY KEY,
+                parent_board_id TEXT,
+                title TEXT NOT NULL DEFAULT '',
                 color_theme TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_boards_parent ON boards(parent_board_id);
 
             CREATE TABLE IF NOT EXISTS elements (
-                id TEXT PRIMARY KEY,
-                board_id TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
-                element_type TEXT NOT NULL,
-                x REAL NOT NULL,
-                y REAL NOT NULL,
-                width REAL NOT NULL,
-                height REAL NOT NULL,
-                z_index INTEGER NOT NULL,
-                content TEXT NOT NULL,
+                id TEXT NOT NULL PRIMARY KEY,
+                board_id TEXT NOT NULL DEFAULT '',
+                element_type TEXT NOT NULL DEFAULT 'note',
+                x REAL NOT NULL DEFAULT 0,
+                y REAL NOT NULL DEFAULT 0,
+                width REAL NOT NULL DEFAULT 0,
+                height REAL NOT NULL DEFAULT 0,
+                z_index INTEGER NOT NULL DEFAULT 0,
+                content TEXT NOT NULL DEFAULT '{}',
                 style TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_elements_board ON elements(board_id);
 
             CREATE TABLE IF NOT EXISTS task_list_items (
-                id TEXT PRIMARY KEY,
-                element_id TEXT NOT NULL REFERENCES elements(id) ON DELETE CASCADE,
-                text TEXT NOT NULL,
+                id TEXT NOT NULL PRIMARY KEY,
+                element_id TEXT NOT NULL DEFAULT '',
+                text TEXT NOT NULL DEFAULT '',
                 is_checked INTEGER NOT NULL DEFAULT 0,
-                order_index INTEGER NOT NULL DEFAULT 0
+                order_index TEXT NOT NULL DEFAULT 'a0'
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_element ON task_list_items(element_id, order_index);
 
             CREATE TABLE IF NOT EXISTS connectors (
-                id TEXT PRIMARY KEY,
-                board_id TEXT NOT NULL REFERENCES boards(id) ON DELETE CASCADE,
-                from_element_id TEXT NOT NULL REFERENCES elements(id) ON DELETE CASCADE,
-                to_element_id TEXT NOT NULL REFERENCES elements(id) ON DELETE CASCADE,
+                id TEXT NOT NULL PRIMARY KEY,
+                board_id TEXT NOT NULL DEFAULT '',
+                from_element_id TEXT NOT NULL DEFAULT '',
+                to_element_id TEXT NOT NULL DEFAULT '',
                 style TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_connectors_board ON connectors(board_id);
             "#,
         )?;
+
+        // Register core tables as Conflict-Free Replicated Relations (CRRs).
+        // crsql_as_crr is idempotent and safe to execute on existing CRR tables.
+        conn.execute_batch(
+            r#"
+            SELECT crsql_as_crr('boards');
+            SELECT crsql_as_crr('elements');
+            SELECT crsql_as_crr('task_list_items');
+            SELECT crsql_as_crr('connectors');
+            "#,
+        )?;
+
+        crate::sync::cursors::init_cursor_tables(&conn)?;
+
+        // Ensure legacy root boards default to 'Home' across all platforms
+        let _ = conn.execute(
+            "UPDATE boards SET title = 'Home' WHERE (parent_board_id IS NULL OR parent_board_id = '') AND (title = 'Welcome to Antigravity Board' OR title = '' OR title IS NULL)",
+            [],
+        );
+
+        // Migrate any elements from old seed board (00000000-0000-0000-0000-000000000001) to canonical root board (37da11b3-458d-489d-904d-d5f83b0d1380)
+        let canonical_root_id = uuid::Uuid::from_u128(0x37da11b3458d489d904dd5f83b0d1380);
+        let legacy_seed_id = uuid::Uuid::from_u128(1);
+        let canonical_root_str = canonical_root_id.to_string();
+        let legacy_seed_str = legacy_seed_id.to_string();
+        let _ = conn.execute(
+            "UPDATE elements SET board_id = ?1 WHERE board_id = ?2 OR board_id = ?3",
+            rusqlite::params![canonical_root_id, legacy_seed_id, legacy_seed_str],
+        );
+        let _ = conn.execute(
+            "UPDATE elements SET board_id = ?1 WHERE board_id = ?2",
+            rusqlite::params![canonical_root_str, legacy_seed_str],
+        );
+        let _ = conn.execute(
+            "DELETE FROM boards WHERE id = ?1 OR id = ?2",
+            rusqlite::params![legacy_seed_id, legacy_seed_str],
+        );
 
         Ok(())
     }
@@ -125,10 +444,11 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, parent_board_id, title, color_theme, created_at, updated_at
-             FROM boards WHERE id = ?1",
+             FROM boards WHERE id = ?1 OR id = ?2",
         )?;
+        let id_str = id.to_string();
         let board = stmt
-            .query_row(params![id], |row| {
+            .query_row(params![id, id_str], |row| {
                 Ok(Board {
                     id: row.get(0)?,
                     parent_board_id: row.get(1)?,
@@ -149,16 +469,17 @@ impl Database {
         if let Some(parent_id) = parent_board_id {
             let mut stmt = conn.prepare(
                 "SELECT id, parent_board_id, title, color_theme, created_at, updated_at
-                 FROM boards WHERE parent_board_id = ?1 ORDER BY title ASC",
+                 FROM boards WHERE parent_board_id = ?1 OR parent_board_id = ?2 ORDER BY title ASC",
             )?;
-            let rows = stmt.query_map(params![parent_id], Self::map_board_row)?;
+            let parent_id_str = parent_id.to_string();
+            let rows = stmt.query_map(params![parent_id, parent_id_str], Self::map_board_row)?;
             for b in rows {
                 boards.push(b?);
             }
         } else {
             let mut stmt = conn.prepare(
                 "SELECT id, parent_board_id, title, color_theme, created_at, updated_at
-                 FROM boards WHERE parent_board_id IS NULL ORDER BY title ASC",
+                 FROM boards WHERE parent_board_id IS NULL OR parent_board_id = '' ORDER BY title ASC",
             )?;
             let rows = stmt.query_map([], Self::map_board_row)?;
             for b in rows {
@@ -215,8 +536,38 @@ impl Database {
     }
 
     pub fn delete_board(&self, id: &Uuid) -> Result<()> {
+        let id_str = id.to_string();
+        let child_ids: Vec<Uuid> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT id FROM boards WHERE parent_board_id = ?1 OR parent_board_id = ?2")?;
+            let rows = stmt.query_map(params![id, id_str], |r| r.get(0))?;
+            let mut ids = Vec::new();
+            for r in rows {
+                ids.push(r?);
+            }
+            ids
+        };
+        for child_id in child_ids {
+            self.delete_board(&child_id)?;
+        }
+
+        let elem_ids: Vec<Uuid> = {
+            let conn = self.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT id FROM elements WHERE board_id = ?1 OR board_id = ?2")?;
+            let rows = stmt.query_map(params![id, id_str], |r| r.get(0))?;
+            let mut ids = Vec::new();
+            for r in rows {
+                ids.push(r?);
+            }
+            ids
+        };
+        for elem_id in elem_ids {
+            self.delete_element(&elem_id)?;
+        }
+
         let conn = self.conn.lock().unwrap();
-        let rows_affected = conn.execute("DELETE FROM boards WHERE id = ?1", params![id])?;
+        conn.execute("DELETE FROM connectors WHERE board_id = ?1 OR board_id = ?2", params![id, id_str])?;
+        let rows_affected = conn.execute("DELETE FROM boards WHERE id = ?1 OR id = ?2", params![id, id_str])?;
         if rows_affected == 0 {
             return Err(AppError::NotFound(format!("Board not found: {}", id)));
         }
@@ -311,12 +662,13 @@ impl Database {
 
     pub fn get_element(&self, id: &Uuid) -> Result<Element> {
         let conn = self.conn.lock().unwrap();
+        let id_str = id.to_string();
         let mut stmt = conn.prepare(
             "SELECT id, board_id, element_type, x, y, width, height, z_index, content, style, created_at, updated_at
-             FROM elements WHERE id = ?1",
+             FROM elements WHERE id = ?1 OR id = ?2",
         )?;
         let element = stmt
-            .query_row(params![id], Self::map_element_row)
+            .query_row(params![id, id_str], Self::map_element_row)
             .optional()?
             .ok_or_else(|| AppError::NotFound(format!("Element not found: {}", id)))?;
         Ok(element)
@@ -324,11 +676,12 @@ impl Database {
 
     pub fn get_board_elements(&self, board_id: &Uuid) -> Result<Vec<Element>> {
         let conn = self.conn.lock().unwrap();
+        let board_id_str = board_id.to_string();
         let mut stmt = conn.prepare(
             "SELECT id, board_id, element_type, x, y, width, height, z_index, content, style, created_at, updated_at
-             FROM elements WHERE board_id = ?1 ORDER BY z_index ASC",
+             FROM elements WHERE board_id = ?1 OR board_id = ?2 ORDER BY z_index ASC",
         )?;
-        let rows = stmt.query_map(params![board_id], Self::map_element_row)?;
+        let rows = stmt.query_map(params![board_id, board_id_str], Self::map_element_row)?;
         let mut elements = Vec::new();
         for el in rows {
             elements.push(el?);
@@ -339,9 +692,10 @@ impl Database {
     pub fn update_element_position(&self, update: &ElementPositionUpdate) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = Utc::now();
+        let id_str = update.id.to_string();
         conn.execute(
-            "UPDATE elements SET x = ?1, y = ?2, width = ?3, height = ?4, z_index = ?5, updated_at = ?6 WHERE id = ?7",
-            params![update.x, update.y, update.width, update.height, update.z_index, now, update.id],
+            "UPDATE elements SET x = ?1, y = ?2, width = ?3, height = ?4, z_index = ?5, updated_at = ?6 WHERE id = ?7 OR id = ?8",
+            params![update.x, update.y, update.width, update.height, update.z_index, now, update.id, id_str],
         )?;
         Ok(())
     }
@@ -351,9 +705,10 @@ impl Database {
         let tx = conn.transaction()?;
         let now = Utc::now();
         for update in updates {
+            let id_str = update.id.to_string();
             tx.execute(
-                "UPDATE elements SET x = ?1, y = ?2, width = ?3, height = ?4, z_index = ?5, updated_at = ?6 WHERE id = ?7",
-                params![update.x, update.y, update.width, update.height, update.z_index, now, update.id],
+                "UPDATE elements SET x = ?1, y = ?2, width = ?3, height = ?4, z_index = ?5, updated_at = ?6 WHERE id = ?7 OR id = ?8",
+                params![update.x, update.y, update.width, update.height, update.z_index, now, update.id, id_str],
             )?;
         }
         tx.commit()?;
@@ -368,9 +723,10 @@ impl Database {
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = Utc::now();
+        let id_str = id.to_string();
         conn.execute(
-            "UPDATE elements SET content = ?1, style = ?2, updated_at = ?3 WHERE id = ?4",
-            params![content, style, now, id],
+            "UPDATE elements SET content = ?1, style = ?2, updated_at = ?3 WHERE id = ?4 OR id = ?5",
+            params![content, style, now, id, id_str],
         )?;
         Ok(())
     }
@@ -382,9 +738,10 @@ impl Database {
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = Utc::now();
+        let id_str = id.to_string();
         conn.execute(
-            "UPDATE elements SET style = ?1, updated_at = ?2 WHERE id = ?3",
-            params![style, now, id],
+            "UPDATE elements SET style = ?1, updated_at = ?2 WHERE id = ?3 OR id = ?4",
+            params![style, now, id, id_str],
         )?;
         Ok(())
     }
@@ -396,16 +753,20 @@ impl Database {
     ) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let now = Utc::now();
+        let id_str = id.to_string();
         conn.execute(
-            "UPDATE elements SET board_id = ?1, updated_at = ?2 WHERE id = ?3",
-            params![board_id, now, id],
+            "UPDATE elements SET board_id = ?1, updated_at = ?2 WHERE id = ?3 OR id = ?4",
+            params![board_id, now, id, id_str],
         )?;
         Ok(())
     }
 
     pub fn delete_element(&self, id: &Uuid) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        let affected = conn.execute("DELETE FROM elements WHERE id = ?1", params![id])?;
+        let id_str = id.to_string();
+        conn.execute("DELETE FROM task_list_items WHERE element_id = ?1 OR element_id = ?2", params![id, id_str])?;
+        conn.execute("DELETE FROM connectors WHERE from_element_id = ?1 OR from_element_id = ?2 OR to_element_id = ?1 OR to_element_id = ?2", params![id, id_str])?;
+        let affected = conn.execute("DELETE FROM elements WHERE id = ?1 OR id = ?2", params![id, id_str])?;
         if affected == 0 {
             return Err(AppError::NotFound(format!("Element not found: {}", id)));
         }
@@ -631,4 +992,31 @@ impl Database {
             updated_at: row.get(11)?,
         })
     }
+
+    // --- Sync Operations ---
+
+    pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap()
+    }
+
+    pub fn get_changes_since(&self, since_version: i64) -> Result<Vec<crate::sync::CrChange>> {
+        let conn = self.conn.lock().unwrap();
+        crate::sync::get_changes_since(&conn, since_version)
+    }
+
+    pub fn apply_changes(&self, changes: &[crate::sync::CrChange]) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        crate::sync::apply_changes(&conn, changes)
+    }
+
+    pub fn get_db_version(&self) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        crate::sync::get_db_version(&conn)
+    }
+
+    pub fn get_site_id(&self) -> Result<Vec<u8>> {
+        let conn = self.conn.lock().unwrap();
+        crate::sync::get_site_id(&conn)
+    }
 }
+

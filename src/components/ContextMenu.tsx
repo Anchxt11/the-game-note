@@ -291,6 +291,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
           }}
           onClick={(e) => e.stopPropagation()}
         >
+          <div className="sheet-drag-handle" />
           <div className="context-menu-item" onClick={() => { onCut(); onClose(); }}>
             <span>Cut</span>
           </div>
@@ -344,7 +345,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
 
             {showAlignSubmenu && (
               <div 
-                className="context-menu-popup submenu" 
+                className="context-menu-popup submenu context-submenu-popup" 
                 style={{
                   position: 'absolute',
                   left: '100%',
@@ -416,6 +417,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
           }}
           onClick={(e) => e.stopPropagation()}
         >
+          <div className="sheet-drag-handle" />
           <div className="context-menu-item" onClick={() => { onSelectAll(); onClose(); }}>
             <span>Select All</span>
             <span className="shortcut-badge"><span className="key-cap">Ctrl</span><span className="key-cap">A</span></span>
@@ -468,6 +470,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
 
             {showBgSubmenu && (
               <div
+                className="context-submenu-popup"
                 style={{
                   position: 'absolute',
                   left: '100%',
@@ -535,6 +538,7 @@ export const ContextMenu: React.FC<ContextMenuProps> = ({
         }}
         onClick={(e) => e.stopPropagation()}
       >
+        <div className="sheet-drag-handle" />
         <div className="color-palette-grid" style={{ display: 'flex', gap: '8px', padding: '10px 16px', justifyContent: 'center' }}>
           {colorKeys.map((colorKey) => {
             const swatch = CARD_COLORS[colorKey];

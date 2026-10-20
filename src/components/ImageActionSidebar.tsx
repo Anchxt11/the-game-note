@@ -6,7 +6,8 @@ import {
   MessageSquarePlus,
   Edit2,
   Trash2,
-  Contrast
+  Contrast,
+  Upload
 } from 'lucide-react';
 import { Element } from '../types';
 
@@ -17,6 +18,7 @@ interface ImageActionSidebarProps {
   onStyleChange: (id: string, newStyle: Record<string, any>) => void;
   onAddCommentPin: (imageId: string) => void;
   onToggleCaption: (imageId: string) => void;
+  onUploadImage?: (file: File) => void;
 }
 
 const CLASSIC_STRIP_COLORS = [
@@ -36,9 +38,11 @@ export const ImageActionSidebar: React.FC<ImageActionSidebarProps> = ({
   onDelete,
   onStyleChange,
   onAddCommentPin,
-  onToggleCaption
+  onToggleCaption,
+  onUploadImage
 }) => {
   const [showColorMenu, setShowColorMenu] = useState(false);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   if (!element) return null;
 
@@ -79,6 +83,32 @@ export const ImageActionSidebar: React.FC<ImageActionSidebarProps> = ({
       </button>
 
       <div className="toolbar-separator" style={{ width: '36px', margin: '8px 0' }} />
+
+      {/* Hidden File Input for Image Upload */}
+      <input
+        type="file"
+        ref={fileInputRef}
+        style={{ display: 'none' }}
+        accept="image/*"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) {
+            onUploadImage?.(file);
+          }
+        }}
+      />
+
+      {/* UPLOAD / REPLACE IMAGE ACTION BUTTON */}
+      <button 
+        className="note-action-btn"
+        onClick={() => fileInputRef.current?.click()}
+        title="Upload or replace image"
+      >
+        <div className="note-action-icon-wrap">
+          <Upload size={18} />
+        </div>
+        <span className="note-action-label">Upload</span>
+      </button>
 
       {/* COLOR ACTION BUTTON */}
       <div style={{ width: '100%', position: 'relative' }}>
