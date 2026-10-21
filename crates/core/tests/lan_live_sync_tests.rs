@@ -24,11 +24,13 @@ async fn test_lan_discovery_and_live_sync_between_instances() {
     let site_id_b = hex::encode(db_b.get_site_id().unwrap());
     assert_ne!(site_id_a, site_id_b);
 
+    let shared_token = "paired_lan_auth_secret_12345".to_string();
+
     // 1. Start Server A on 127.0.0.1:8920
     let srv_cfg_a = ServerConfig {
         host: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         port: 8920,
-        auth_token: None,
+        auth_token: Some(shared_token.clone()),
         device_name: Some("Device A".to_string()),
         sync_keys: None,
         on_change_applied: None,
@@ -42,7 +44,7 @@ async fn test_lan_discovery_and_live_sync_between_instances() {
     let srv_cfg_b = ServerConfig {
         host: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         port: 8921,
-        auth_token: None,
+        auth_token: Some(shared_token.clone()),
         device_name: Some("Device B".to_string()),
         sync_keys: None,
         on_change_applied: Some(Arc::new(move || {
@@ -52,9 +54,26 @@ async fn test_lan_discovery_and_live_sync_between_instances() {
     let srv_handle_b = start_sync_server(srv_cfg_b, db_b.clone(), None).await.unwrap();
     let port_b = srv_handle_b.port();
 
-    // 3. Coordinators
-    let coord_a = Arc::new(SyncCoordinator::new(db_a.clone(), vec![], None, None));
-    let coord_b = Arc::new(SyncCoordinator::new(db_b.clone(), vec![], None, None));
+    // 3. Coordinators with pre-paired peers
+    let peer_b_cfg = milanote_core::sync::coordinator::PeerConfig {
+        site_id: site_id_b.clone(),
+        name: "Device B".to_string(),
+        endpoints: vec![milanote_core::sync::coordinator::EndpointConfig {
+            kind: milanote_core::transport::TransportKind::Lan,
+            url: format!("http://127.0.0.1:{}", port_b),
+        }],
+    };
+    let peer_a_cfg = milanote_core::sync::coordinator::PeerConfig {
+        site_id: site_id_a.clone(),
+        name: "Device A".to_string(),
+        endpoints: vec![milanote_core::sync::coordinator::EndpointConfig {
+            kind: milanote_core::transport::TransportKind::Lan,
+            url: format!("http://127.0.0.1:{}", port_a),
+        }],
+    };
+
+    let coord_a = Arc::new(SyncCoordinator::new(db_a.clone(), vec![peer_b_cfg], None, Some(shared_token.clone())));
+    let coord_b = Arc::new(SyncCoordinator::new(db_b.clone(), vec![peer_a_cfg], None, Some(shared_token.clone())));
 
     // Connect peers via simulated discovery callback or direct endpoint
     let disc_peer_b = DiscoveredPeer {
@@ -145,3 +164,34 @@ async fn test_lan_discovery_and_live_sync_between_instances() {
     srv_handle_a.stop();
     srv_handle_b.stop();
 }
+
+#[tokio::test]
+async fn test_unpaired_discovered_peer_is_rejected_and_not_synced() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("db.db");
+    let db = Arc::new(Database::open_path(&db_path).unwrap());
+
+    // Coordinator with no paired peers
+    let coord = Arc::new(SyncCoordinator::new(db.clone(), vec![], None, None));
+
+    // Stranger device broadcasts on LAN
+    let stranger = DiscoveredPeer {
+        site_id: "99999999999999999999999999999999".to_string(),
+        device_name: "Attacker / Stranger".to_string(),
+        ip: "192.168.1.100".to_string(),
+        port: 8765,
+        endpoint_url: "http://192.168.1.100:8765".to_string(),
+    };
+
+    // Attempt to handle discovered stranger
+    coord.handle_discovered_peer(stranger).await;
+
+    // Verify stranger was NOT added to peers
+    let peers = coord.get_peers().await;
+    assert!(peers.is_empty(), "Unpaired stranger must never be auto-added to peers");
+
+    // Also test when LAN is disabled
+    coord.set_lan_enabled(false);
+    assert!(!coord.is_lan_enabled());
+}
+

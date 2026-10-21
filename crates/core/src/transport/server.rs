@@ -128,8 +128,12 @@ pub fn is_valid_file_id(id: &str) -> bool {
 
 fn check_auth(headers: &HeaderMap, expected_token: Option<&str>) -> bool {
     let Some(expected) = expected_token else {
-        return true;
+        return false;
     };
+
+    if expected.is_empty() {
+        return false;
+    }
 
     let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION) else {
         return false;
@@ -624,7 +628,8 @@ pub fn create_sync_router(state: Arc<ServerState>) -> Router {
 /// Handle to a running embedded sync server.
 pub struct ServerHandle {
     port: u16,
-    shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    shutdown_tx: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    join_handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     event_tx: broadcast::Sender<i64>,
 }
 
@@ -637,8 +642,26 @@ impl ServerHandle {
         self.event_tx.clone()
     }
 
-    pub fn stop(self) {
-        let _ = self.shutdown_tx.send(());
+    pub fn stop(&self) {
+        if let Ok(mut tx) = self.shutdown_tx.lock() {
+            if let Some(sender) = tx.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
+
+    pub async fn stop_and_wait(&self) {
+        self.stop();
+        let mut handle_guard = self.join_handle.lock().await;
+        if let Some(handle) = handle_guard.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for ServerHandle {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -660,19 +683,32 @@ pub async fn start_sync_server(
     });
 
     let app = create_sync_router(state);
-    let listener = match tokio::net::TcpListener::bind(SocketAddr::new(config.host, config.port)).await {
-        Ok(l) => l,
-        Err(e) => {
-            let mut bound = None;
-            for p in (config.port + 1)..=(config.port + 10) {
-                if let Ok(l) = tokio::net::TcpListener::bind(SocketAddr::new(config.host, p)).await {
-                    bound = Some(l);
+    let target_addr = SocketAddr::new(config.host, config.port);
+    let listener = if config.port == 0 {
+        tokio::net::TcpListener::bind(target_addr).await?
+    } else {
+        let mut last_err = None;
+        let mut bound_listener = None;
+        for attempt in 0..10 {
+            match tokio::net::TcpListener::bind(target_addr).await {
+                Ok(l) => {
+                    bound_listener = Some(l);
                     break;
                 }
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < 9 {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    }
+                }
             }
-            match bound {
-                Some(l) => l,
-                None => return Err(crate::error::AppError::Io(e)),
+        }
+        match bound_listener {
+            Some(l) => l,
+            None => {
+                let err = last_err.unwrap();
+                log::error!("Failed to bind sync server to {}: {}", target_addr, err);
+                return Err(crate::error::AppError::Io(err));
             }
         }
     };
@@ -680,7 +716,7 @@ pub async fn start_sync_server(
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
-    tokio::spawn(async move {
+    let join_handle = tokio::spawn(async move {
         axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 let _ = shutdown_rx.await;
@@ -691,7 +727,8 @@ pub async fn start_sync_server(
 
     Ok(ServerHandle {
         port: bound_port,
-        shutdown_tx,
+        shutdown_tx: std::sync::Mutex::new(Some(shutdown_tx)),
+        join_handle: tokio::sync::Mutex::new(Some(join_handle)),
         event_tx,
     })
 }

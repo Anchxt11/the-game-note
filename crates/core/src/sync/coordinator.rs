@@ -82,6 +82,7 @@ pub struct SyncCoordinator {
     mailbox_lock: Arc<Mutex<()>>,
     mailbox_runtime: Arc<RwLock<PeerRuntimeState>>,
     storage: Arc<RwLock<Option<Arc<FileStorage>>>>,
+    lan_enabled: Arc<AtomicBool>,
 }
 
 impl SyncCoordinator {
@@ -127,7 +128,16 @@ impl SyncCoordinator {
             mailbox_lock: Arc::new(Mutex::new(())),
             mailbox_runtime: Arc::new(RwLock::new(PeerRuntimeState::default())),
             storage: Arc::new(RwLock::new(storage)),
+            lan_enabled: Arc::new(AtomicBool::new(true)),
         }
+    }
+
+    pub fn is_lan_enabled(&self) -> bool {
+        self.lan_enabled.load(Ordering::SeqCst)
+    }
+
+    pub fn set_lan_enabled(&self, enabled: bool) {
+        self.lan_enabled.store(enabled, Ordering::SeqCst);
     }
 
     pub async fn set_storage(&self, storage: Option<Arc<FileStorage>>) {
@@ -282,19 +292,21 @@ impl SyncCoordinator {
         }
 
         // 2. Sync with direct LAN peers
-        for peer in peers {
-            if let Some(target) = target_peer_id {
-                if peer.site_id != target {
-                    continue;
+        if self.is_lan_enabled() {
+            for peer in peers {
+                if let Some(target) = target_peer_id {
+                    if peer.site_id != target {
+                        continue;
+                    }
                 }
-            }
 
-            match self.sync_peer_cycle(&peer).await {
-                Ok((actual_site_id, stats)) => {
-                    results.push((actual_site_id, stats));
-                }
-                Err(e) => {
-                    log::warn!("Sync cycle failed for peer {}: {}", peer.site_id, e);
+                match self.sync_peer_cycle(&peer).await {
+                    Ok((actual_site_id, stats)) => {
+                        results.push((actual_site_id, stats));
+                    }
+                    Err(e) => {
+                        log::warn!("Sync cycle failed for peer {}: {}", peer.site_id, e);
+                    }
                 }
             }
         }
@@ -349,6 +361,10 @@ impl SyncCoordinator {
             if !candidate_endpoints.iter().any(|c| c.url == ep.url) {
                 candidate_endpoints.push(ep.clone());
             }
+        }
+
+        if candidate_endpoints.iter().any(|c| !c.url.contains("localhost") && !c.url.contains("127.0.0.1")) {
+            candidate_endpoints.retain(|c| !c.url.contains("localhost") && !c.url.contains("127.0.0.1"));
         }
 
         if candidate_endpoints.is_empty() {
@@ -672,14 +688,19 @@ impl SyncCoordinator {
                     if is_active && kp.push_version < min_push_cursor {
                         min_push_cursor = kp.push_version;
                     }
-                    let transport = if is_active {
-                        if active_transport.is_none() {
-                            active_transport = Some(TransportKind::Lan);
+                    let transport = if is_active && self.is_lan_enabled() {
+                        if let Some(r_state) = runtime.get(&kp.peer_id) {
+                            r_state.active_transport
+                        } else {
+                            None
                         }
-                        Some(TransportKind::Lan)
                     } else {
                         None
                     };
+
+                    if transport.is_some() && active_transport.is_none() {
+                        active_transport = transport;
+                    }
 
                     peer_statuses.push(PeerSyncStatus {
                         peer_id: kp.peer_id,
@@ -814,10 +835,72 @@ impl SyncCoordinator {
     }
 
     pub async fn handle_discovered_peer(self: &Arc<Self>, discovered: crate::transport::discovery::DiscoveredPeer) {
+        if !self.is_lan_enabled() {
+            return;
+        }
+
         if let Ok(local_site) = self.db.get_site_id() {
             if hex::encode(local_site) == discovered.site_id {
                 return;
             }
+        }
+
+        // 1. Check if the peer is already known by exact site_id or endpoint
+        let is_exact_known = {
+            let peers = self.peers.read().await;
+            peers.iter().any(|p| p.site_id == discovered.site_id || p.endpoints.iter().any(|e| e.url == discovered.endpoint_url))
+        } || {
+            let conn = self.db.conn();
+            cursors::list_peers(&conn)
+                .map(|list| list.iter().any(|kp| kp.peer_id == discovered.site_id))
+                .unwrap_or(false)
+        };
+
+        let auth_token = self.auth_token.read().await.clone();
+        let sync_keys = self.sync_keys.read().await.clone();
+
+        // 2. If not known by exact site_id, verify using shared auth_token
+        let is_verified = if is_exact_known {
+            true
+        } else if let Some(ref token) = auth_token {
+            let probe_client = HttpClient::new(
+                discovered.endpoint_url.clone(),
+                TransportKind::Lan,
+                Some(token.clone()),
+                Some(discovered.site_id.clone()),
+                None,
+                sync_keys.clone(),
+            );
+            match probe_client.health().await {
+                Ok(health) => {
+                    log::info!(
+                        "Successfully verified discovered LAN peer {} ({}) with shared pairing token",
+                        health.device_name.as_deref().unwrap_or(&discovered.device_name),
+                        health.site_id
+                    );
+                    true
+                }
+                Err(e) => {
+                    log::debug!(
+                        "Ignoring un-paired LAN peer {} ({}): health verification failed: {}",
+                        discovered.device_name,
+                        discovered.site_id,
+                        e
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        if !is_verified {
+            log::debug!(
+                "Ignoring un-paired LAN peer {} ({})",
+                discovered.device_name,
+                discovered.site_id
+            );
+            return;
         }
 
         let mut peers = self.peers.write().await;
@@ -825,6 +908,7 @@ impl SyncCoordinator {
             if !discovered.device_name.is_empty() {
                 existing.name = discovered.device_name.clone();
             }
+            existing.endpoints.retain(|e| !e.url.contains("localhost") && !e.url.contains("127.0.0.1"));
             if !existing.endpoints.iter().any(|e| e.url == discovered.endpoint_url) {
                 existing.endpoints.push(EndpointConfig {
                     kind: TransportKind::Lan,
@@ -832,6 +916,25 @@ impl SyncCoordinator {
                 });
             }
             existing.clone()
+        } else if let Some(placeholder) = peers.iter_mut().find(|p| !is_valid_site_id(&p.site_id) || p.name == "Paired Hub") {
+            log::info!(
+                "Adopting real site_id {} and endpoint {} for placeholder peer {}",
+                discovered.site_id,
+                discovered.endpoint_url,
+                placeholder.name
+            );
+            placeholder.site_id = discovered.site_id.clone();
+            if !discovered.device_name.is_empty() {
+                placeholder.name = discovered.device_name.clone();
+            }
+            placeholder.endpoints.retain(|e| !e.url.contains("localhost") && !e.url.contains("127.0.0.1"));
+            if !placeholder.endpoints.iter().any(|e| e.url == discovered.endpoint_url) {
+                placeholder.endpoints.push(EndpointConfig {
+                    kind: TransportKind::Lan,
+                    url: discovered.endpoint_url.clone(),
+                });
+            }
+            placeholder.clone()
         } else if let Some(existing) = peers.iter_mut().find(|p| p.endpoints.iter().any(|e| e.url == discovered.endpoint_url)) {
             existing.site_id = discovered.site_id.clone();
             if !discovered.device_name.is_empty() {
@@ -958,6 +1061,10 @@ impl SyncCoordinator {
         }
 
         // 2. Fast push to LAN peers
+        if !self.is_lan_enabled() {
+            return;
+        }
+
         let peers = { self.peers.read().await.clone() };
         if peers.is_empty() {
             return;

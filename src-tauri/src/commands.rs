@@ -205,9 +205,19 @@ pub async fn restart_sync_server_internal(
     sync_state: &AppSyncState,
     config: &SyncConfig,
 ) {
+    // 1. Update coordinator LAN state
+    sync_state.coordinator.set_lan_enabled(config.server.enabled);
+
+    // 2. Stop old server
     let mut handle_guard = sync_state.server_handle.lock().await;
     if let Some(old) = handle_guard.take() {
-        old.stop();
+        old.stop_and_wait().await;
+    }
+
+    // 3. Stop old discovery handle
+    let mut disc_guard = sync_state.discovery_handle.lock().await;
+    if let Some(old_disc) = disc_guard.take() {
+        old_disc.stop();
     }
 
     if config.server.enabled {
@@ -263,6 +273,36 @@ pub async fn restart_sync_server_internal(
                 log::error!("Failed to start sync server: {}", e);
             }
         }
+
+        // Restart LAN discovery broadcaster and listener
+        let my_site_id = hex::encode(sync_state.db.get_site_id().unwrap_or_default());
+        let my_device_name = config.device_name.clone();
+        let my_port = handle_guard.as_ref().map(|h| h.port()).unwrap_or(config.server.port);
+        let coord_discovery = sync_state.coordinator.clone();
+        let app_discovery = app.clone();
+        let app_data_dir = sync_state.app_data_dir.clone();
+        let new_disc = milanote_core::transport::start_lan_discovery(
+            my_site_id,
+            my_device_name,
+            my_port,
+            true,
+            move |peer| {
+                let coord = coord_discovery.clone();
+                let app_handle = app_discovery.clone();
+                let app_data_dir = app_data_dir.clone();
+                tauri::async_runtime::spawn(async move {
+                    coord.handle_discovered_peer(peer).await;
+                    let updated_peers = coord.get_peers().await;
+                    let mut config = SyncConfig::load_or_default(&app_data_dir);
+                    if config.peers != updated_peers {
+                        config.peers = updated_peers;
+                        let _ = config.save(&app_data_dir);
+                    }
+                    let _ = app_handle.emit("sync-status-changed", &coord.get_status().await.ok());
+                });
+            },
+        );
+        *disc_guard = Some(new_disc);
     }
 }
 
@@ -292,14 +332,14 @@ pub async fn start_pairing(
     sync_state.set_keys(keys).await;
 
     let config = SyncConfig::load_or_default(&sync_state.app_data_dir);
+    let server_port = {
+        let lock = sync_state.server_handle.lock().await;
+        lock.as_ref().map(|h| h.port()).unwrap_or(config.server.port)
+    };
     let mut hub_hints = Vec::new();
-    if config.server.enabled {
-        if let Some(ip) = get_local_outbound_ip() {
-            if !ip.is_loopback() {
-                hub_hints.push(format!("http://{}:{}", ip, config.server.port));
-            }
-        }
-        hub_hints.push(format!("http://localhost:{}", config.server.port));
+    let local_ips = get_local_ips();
+    for ip in local_ips {
+        hub_hints.push(format!("http://{}:{}", ip, server_port));
     }
 
     let hub_site_id = hex::encode(sync_state.db.get_site_id().map_err(|e| e.to_string())?);
@@ -328,10 +368,21 @@ pub async fn start_pairing(
     })
 }
 
-fn get_local_outbound_ip() -> Option<std::net::IpAddr> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:80").ok()?;
-    Some(socket.local_addr().ok()?.ip())
+fn get_local_ips() -> Vec<std::net::IpAddr> {
+    let mut ips = Vec::new();
+    for target in &["8.8.8.8:80", "1.1.1.1:80", "192.168.1.1:80", "10.0.0.1:80", "172.16.0.1:80"] {
+        if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+            if socket.connect(target).is_ok() {
+                if let Ok(local) = socket.local_addr() {
+                    let ip = local.ip();
+                    if !ip.is_loopback() && !ips.contains(&ip) {
+                        ips.push(ip);
+                    }
+                }
+            }
+        }
+    }
+    ips
 }
 
 #[tauri::command]
@@ -359,11 +410,12 @@ pub async fn complete_pairing(
         }
     }
 
-    // Add hub endpoints if provided
+    // Add hub endpoints if provided (ignoring loopback/localhost)
     if !payload.hub_hints.is_empty() {
         let endpoints: Vec<EndpointConfig> = payload
             .hub_hints
             .into_iter()
+            .filter(|url| !url.contains("localhost") && !url.contains("127.0.0.1"))
             .map(|url| {
                 let kind = if url.contains("100.") || url.contains(".ts.net") {
                     TransportKind::Tailscale

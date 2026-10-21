@@ -43,7 +43,11 @@ pub fn start_lan_discovery<F>(
 where
     F: Fn(DiscoveredPeer) + Send + Sync + 'static,
 {
-    let running = Arc::new(AtomicBool::new(true));
+    let running = Arc::new(AtomicBool::new(is_server_enabled));
+    if !is_server_enabled {
+        return LanDiscoveryHandle { running };
+    }
+
     let on_peer_found = Arc::new(on_peer_found);
 
     let rt_handle = match tokio::runtime::Handle::try_current() {

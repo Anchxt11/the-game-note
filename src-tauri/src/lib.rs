@@ -82,6 +82,7 @@ pub fn run() {
                 mailbox_url,
                 Some(storage_arc.clone()),
             ));
+            coordinator.set_lan_enabled(sync_config.server.enabled);
 
             // Automated rolling daily backup on startup (Task 5.11)
             let backup_dir = app_data_dir.join("backups");
@@ -166,27 +167,31 @@ pub fn run() {
             let app_discovery = app.handle().clone();
             let app_data_dir_discovery = app_data_dir.clone();
             let is_server_enabled = server_handle.is_some() && sync_config.server.enabled;
-            let discovery_handle = milanote_core::transport::start_lan_discovery(
-                my_site_id,
-                my_device_name,
-                my_port,
-                is_server_enabled,
-                move |peer| {
-                    let coord = coord_discovery.clone();
-                    let app_handle = app_discovery.clone();
-                    let app_data_dir = app_data_dir_discovery.clone();
-                    tauri::async_runtime::spawn(async move {
-                        coord.handle_discovered_peer(peer).await;
-                        let updated_peers = coord.get_peers().await;
-                        let mut config = SyncConfig::load_or_default(&app_data_dir);
-                        if config.peers != updated_peers {
-                            config.peers = updated_peers;
-                            let _ = config.save(&app_data_dir);
-                        }
-                        let _ = app_handle.emit("sync-status-changed", &coord.get_status().await.ok());
-                    });
-                },
-            );
+            let discovery_handle = if is_server_enabled {
+                Some(milanote_core::transport::start_lan_discovery(
+                    my_site_id,
+                    my_device_name,
+                    my_port,
+                    is_server_enabled,
+                    move |peer| {
+                        let coord = coord_discovery.clone();
+                        let app_handle = app_discovery.clone();
+                        let app_data_dir = app_data_dir_discovery.clone();
+                        tauri::async_runtime::spawn(async move {
+                            coord.handle_discovered_peer(peer).await;
+                            let updated_peers = coord.get_peers().await;
+                            let mut config = SyncConfig::load_or_default(&app_data_dir);
+                            if config.peers != updated_peers {
+                                config.peers = updated_peers;
+                                let _ = config.save(&app_data_dir);
+                            }
+                            let _ = app_handle.emit("sync-status-changed", &coord.get_status().await.ok());
+                        });
+                    },
+                ))
+            } else {
+                None
+            };
 
             // Real-time SSE push listener: connects to peers and triggers immediate sync on change
             let coord_sse = coordinator.clone();
@@ -196,6 +201,10 @@ pub fn run() {
                 let active_listeners = Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::<String>::new()));
 
                 loop {
+                    if !coord_sse.is_lan_enabled() {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                        continue;
+                    }
                     let peers = coord_sse.get_peers().await;
                     for peer in peers {
                         let is_active = {
@@ -307,7 +316,7 @@ pub fn run() {
                 storage: storage_arc,
                 coordinator: coordinator.clone(),
                 server_handle: Mutex::new(server_handle),
-                discovery_handle: Mutex::new(Some(discovery_handle)),
+                discovery_handle: Mutex::new(discovery_handle),
                 app_data_dir: app_data_dir.clone(),
                 sync_keys: Arc::new(RwLock::new(sync_keys)),
             };
