@@ -95,6 +95,19 @@ Deployed gamenote-mailbox triggers:
 
 Copy that URL into GameNote: **Settings $\rightarrow$ Cloud Relay Endpoint URL $\rightarrow$ Enable Cloud Relay**.
 
+#### Syncing on Local WIFI/LAN
+
+Requirements:
+Run the following commands in your system
+
+```bash
+sudo ufw allow from 192.168.0.0/16 to any port 8766 proto udp comment "The Game Note Discovery (Private LAN only)"
+
+sudo ufw allow from 192.168.0.0/16 to any port 8765 proto tcp comment "The Game Note Sync (Private LAN only)"
+
+```
+
+
 ---
 
 ## ✨ Features
