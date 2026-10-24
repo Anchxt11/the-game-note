@@ -961,7 +961,7 @@ export interface CanvasProps {
   onDropTool: (tool: ToolType, x: number, y: number, targetColumnId?: string, isUnsorted?: boolean, targetBoardId?: string) => void;
   onCreateTaskListFromItem?: (x: number, y: number, item: any, targetColumnId?: string) => void;
   onCreateQuickLine?: (sourceElementId: string) => Promise<string | undefined>;
-  onDeleteElement?: (id: string) => void;
+  onDeleteElement?: (id: string | string[]) => void;
   onDuplicateElement?: (id?: string) => void;
   onCopyElement?: () => void;
   onToggleLockElement?: (id?: string) => void;
@@ -1869,9 +1869,15 @@ export const Canvas: React.FC<CanvasProps> = ({
   const computeLineEndpoint = useCallback((lineEl: Element, content: Record<string, any>, isStart: boolean) => {
     const targetId = isStart ? content.start_target_id : content.end_target_id;
     if (targetId) {
-      let box = { x: 0, y: 0, width: 340, height: 200 };
       const targetDom = document.getElementById(`milanote-el-${targetId}`);
       const stateEl = elements.find(x => x.id === targetId);
+      if (!targetDom && !stateEl) {
+        const fx = lineEl.x + (isStart ? (content.start_x ?? 0) : (content.end_x ?? 200));
+        const fy = lineEl.y + (isStart ? (content.start_y ?? 200) : (content.end_y ?? 0));
+        return { x: fx, y: fy, box: null, anchor: 'none', cx: fx, cy: fy };
+      }
+
+      let box = { x: 0, y: 0, width: 340, height: 200 };
       if (targetDom) {
         const isBoard = stateEl?.element_type === 'nested_board';
         const iconDom = isBoard ? targetDom.querySelector('.board-icon-badge, .column-board-icon-box') : null;
@@ -2358,7 +2364,38 @@ export const Canvas: React.FC<CanvasProps> = ({
 
   const columns = useMemo(() => elements.filter((el) => el.element_type === 'column' && !el.style?.parent_column_id), [elements]);
   const rootElements = useMemo(() => elements.filter((el) => el.element_type !== 'column' && el.element_type !== 'line' && (!el.style?.parent_column_id || (el.element_type === 'comment' && Boolean(el.content?.is_pinned)))), [elements]);
-  const lineElements = useMemo(() => elements.filter((el) => el.element_type === 'line'), [elements]);
+  const lineElements = useMemo(() => {
+    const elIdSet = new Set(elements.map((e) => e.id));
+    return elements.filter((el) => {
+      if (el.element_type !== 'line') return false;
+      const startId = typeof el.content?.start_target_id === 'string' && el.content.start_target_id.trim().length > 0
+        ? el.content.start_target_id.trim()
+        : null;
+      const endId = typeof el.content?.end_target_id === 'string' && el.content.end_target_id.trim().length > 0
+        ? el.content.end_target_id.trim()
+        : null;
+      const hasStart = startId !== null;
+      const hasEnd = endId !== null;
+
+      // Standalone arrows (not connected to any element) are preserved and rendered
+      if (!hasStart && !hasEnd) return true;
+
+      // Scenario 1: 2 elements, but one or both are missing
+      if (hasStart && hasEnd && (!elIdSet.has(startId) || !elIdSet.has(endId))) {
+        return false;
+      }
+
+      // Scenario 2: 1 element, but that element is missing
+      if (hasStart && !hasEnd && !elIdSet.has(startId)) {
+        return false;
+      }
+      if (!hasStart && hasEnd && !elIdSet.has(endId)) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [elements]);
   const getColumnChildren = useCallback((columnId: string) => {
     const children = elements.filter((el) => el.style?.parent_column_id === columnId && el.element_type !== 'line' && !(el.element_type === 'comment' && Boolean(el.content?.is_pinned)));
     return children.sort((a, b) => {
@@ -2581,8 +2618,8 @@ export const Canvas: React.FC<CanvasProps> = ({
             item.currentX = newX;
             item.currentY = newY;
             const animTransform = isDesktop
-              ? `translate3d(${newX}px, ${newY}px, 0) scale(1.02) rotate(${tiltDeg}deg)`
-              : `translate3d(${newX}px, ${newY}px, 0)`;
+              ? `translate(${newX}px, ${newY}px) scale(1.02) rotate(${tiltDeg}deg)`
+              : `translate(${newX}px, ${newY}px)`;
             elDiv.style.transform = animTransform;
             elDiv.style.transformOrigin = 'center center';
           }
@@ -2754,7 +2791,7 @@ export const Canvas: React.FC<CanvasProps> = ({
             if (elDiv) {
               const newX = Math.round(item.origX + dx);
               const newY = Math.round(item.origY + dy);
-              elDiv.style.transform = `translate3d(${newX}px, ${newY}px, 0)`;
+              elDiv.style.transform = `translate(${newX}px, ${newY}px)`;
               elDiv.style.left = '0px';
               elDiv.style.top = '0px';
             }
@@ -3134,8 +3171,8 @@ export const Canvas: React.FC<CanvasProps> = ({
           }
           return;
         }
-        let newWidth = Math.max(item.origWidth + dx, 110);
-        let newHeight = Math.max(item.origHeight + dy, 50);
+        let newWidth = Math.max(Math.round(item.origWidth + dx), 110);
+        let newHeight = Math.max(Math.round(item.origHeight + dy), 50);
 
         if (resizeDirection === 's') {
           newWidth = item.origWidth;
@@ -3160,6 +3197,9 @@ export const Canvas: React.FC<CanvasProps> = ({
           newHeight = Math.max(Math.round(newWidth / aspectRatio), 40);
         }
 
+        newWidth = Math.round(newWidth);
+        newHeight = Math.round(newHeight);
+
         item.currentX = item.origX;
         item.currentY = item.origY;
         dragRef.current.liveWidth = newWidth;
@@ -3171,7 +3211,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         const currentEl = elements.find((x) => x.id === elementId);
         const isAutoHeightEl = item.isColumn || item.elementType === 'task_list' || (item.elementType === 'image' && Boolean(currentEl?.content?.show_caption));
         if (elDiv) {
-          elDiv.style.transform = `translate3d(${item.origX}px, ${item.origY}px, 0)`;
+          elDiv.style.transform = `translate(${Math.round(item.origX)}px, ${Math.round(item.origY)}px)`;
           elDiv.style.width = `${newWidth}px`;
           if (item.elementType === 'image') {
             const photoWrap = elDiv.querySelector('.image-photo-wrap') as HTMLElement | null;
@@ -3402,7 +3442,7 @@ export const Canvas: React.FC<CanvasProps> = ({
       }
 
       if (e.clientX <= 75 && e.clientY >= window.innerHeight - 80) {
-        dragGroup.forEach((item) => onDeleteElement(item.id));
+        onDeleteElement(dragGroup.map((item) => item.id));
         onSetHoveringTrash(false);
         setDragOverColumnId(null);
         setDragOverTaskListId(null);
@@ -3572,7 +3612,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         const currentEl = elements.find((x) => x.id === item.id);
         const isAutoHeightEl = item.isColumn || item.elementType === 'task_list' || (item.elementType === 'image' && Boolean(currentEl?.content?.show_caption));
         if (elDiv) {
-          elDiv.style.transform = `translate3d(${item.origX}px, ${item.origY}px, 0)`;
+          elDiv.style.transform = `translate(${Math.round(item.origX)}px, ${Math.round(item.origY)}px)`;
           elDiv.style.width = `${newWidth}px`;
           if (!isAutoHeightEl) {
             elDiv.style.height = `${newHeight}px`;
@@ -3611,7 +3651,7 @@ export const Canvas: React.FC<CanvasProps> = ({
           const elDiv = document.getElementById(`milanote-el-${item.id}`);
           if (elDiv) {
             elDiv.classList.remove('drag-settle-animation');
-            elDiv.style.transform = `translate3d(${Math.round(item.origX + dx)}px, ${Math.round(item.origY + dy)}px, 0)`;
+            elDiv.style.transform = `translate(${Math.round(item.origX + dx)}px, ${Math.round(item.origY + dy)}px)`;
           }
         });
       }
@@ -4930,7 +4970,7 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
 
     const isLightBg = isLightColor(el.style?.background_color);
-    const textColor = isLightBg ? '#2d3340' : '#e4ebf7';
+    const textColor = isLightBg ? '#1e293b' : '#ffffff';
 
     return (
       <div 
@@ -4978,12 +5018,12 @@ export const Canvas: React.FC<CanvasProps> = ({
       const isDesktop = !isTouchPrimary() && !isPhoneScreen();
       const tiltDeg = (isDragging && isDesktop) ? (dragRef.current?.currentTilt || 0).toFixed(2) : '0';
       const colTransform = isThisResizing
-        ? `translate3d(${el.x}px, ${el.y}px, 0)`
+        ? `translate(${Math.round(el.x)}px, ${Math.round(el.y)}px)`
         : (isDragging
             ? (isDesktop
-                ? `translate3d(${posX}px, ${posY}px, 0) scale(1.02) rotate(${tiltDeg}deg)`
-                : `translate3d(${posX}px, ${posY}px, 0)`)
-            : `translate3d(${el.x}px, ${el.y}px, 0)`);
+                ? `translate(${Math.round(posX)}px, ${Math.round(posY)}px) scale(1.02) rotate(${tiltDeg}deg)`
+                : `translate(${Math.round(posX)}px, ${Math.round(posY)}px)`)
+            : `translate(${Math.round(el.x)}px, ${Math.round(el.y)}px)`);
       return (
         <div
           key={el.id}
@@ -5156,9 +5196,9 @@ export const Canvas: React.FC<CanvasProps> = ({
       const tiltDeg = (isDragging && isDesktop) ? (dragRef.current?.currentTilt || 0).toFixed(2) : '0';
       const boardTransform = isDragging
         ? (isDesktop
-            ? `translate3d(${posX}px, ${posY}px, 0) scale(1.02) rotate(${tiltDeg}deg)`
-            : `translate3d(${posX}px, ${posY}px, 0)`)
-        : `translate3d(${posX}px, ${posY}px, 0)`;
+            ? `translate(${Math.round(posX)}px, ${Math.round(posY)}px) scale(1.02) rotate(${tiltDeg}deg)`
+            : `translate(${Math.round(posX)}px, ${Math.round(posY)}px)`)
+        : `translate(${Math.round(posX)}px, ${Math.round(posY)}px)`;
       return (
         <div
           key={el.id}
@@ -5289,12 +5329,12 @@ export const Canvas: React.FC<CanvasProps> = ({
     const isDesktop = !isTouchPrimary() && !isPhoneScreen();
     const tiltDeg = (isDragging && isDesktop) ? (dragRef.current?.currentTilt || 0).toFixed(2) : '0';
     const cardTransform = isThisResizing
-      ? `translate3d(${el.x}px, ${el.y}px, 0)`
+      ? `translate(${Math.round(el.x)}px, ${Math.round(el.y)}px)`
       : (isDragging
           ? (isDesktop
-              ? `translate3d(${posX}px, ${posY}px, 0) scale(1.02) rotate(${tiltDeg}deg)`
-              : `translate3d(${posX}px, ${posY}px, 0)`)
-          : `translate3d(${el.x}px, ${el.y}px, 0)`);
+              ? `translate(${Math.round(posX)}px, ${Math.round(posY)}px) scale(1.02) rotate(${tiltDeg}deg)`
+              : `translate(${Math.round(posX)}px, ${Math.round(posY)}px)`)
+          : `translate(${Math.round(el.x)}px, ${Math.round(el.y)}px)`);
     return (
       <div
         key={el.id}
@@ -5409,10 +5449,10 @@ export const Canvas: React.FC<CanvasProps> = ({
   const gridPatternSize = Number(scaledGrid.toFixed(3));
 
   // Antialiased dot sizing with perceptual scaling
-  const dotRadius = Math.max(0.65, Math.min(1.25, 0.82 * Math.pow(scale, 0.35)));
+  const dotRadius = Math.max(0.75, Math.min(1.35, 0.85 * Math.pow(scale, 0.35)));
   // Smooth opacity falloff when zoomed out below 0.65x zoom to prevent high-frequency moiré noise
   const fade = Math.min(1, Math.max(0, (scale - minScaleRef.current) / 0.35));
-  const dotAlpha = Number((0.10 * fade).toFixed(3));
+  const dotAlpha = Number((0.14 * fade).toFixed(3));
 
   return (
     <div
@@ -5442,7 +5482,7 @@ export const Canvas: React.FC<CanvasProps> = ({
           backgroundPosition: `${gridPosX}px ${gridPosY}px`,
           backgroundSize: `${gridPatternSize}px ${gridPatternSize}px`,
           backgroundImage: dotAlpha > 0.005
-            ? `radial-gradient(circle, rgba(255, 255, 255, ${dotAlpha}) ${dotRadius.toFixed(2)}px, rgba(255, 255, 255, 0) ${(dotRadius + 0.85).toFixed(2)}px)`
+            ? `radial-gradient(circle, rgba(255, 255, 255, ${dotAlpha}) ${dotRadius.toFixed(2)}px, rgba(255, 255, 255, 0) ${(dotRadius + 0.5).toFixed(2)}px)`
             : 'none',
         }}
       />
@@ -5450,7 +5490,7 @@ export const Canvas: React.FC<CanvasProps> = ({
       <div
         className="canvas-plane"
         style={{
-          transform: `translate(${pan.x}px, ${pan.y}px) scale(${scale})`,
+          transform: `translate(${Math.round(pan.x)}px, ${Math.round(pan.y)}px) scale(${scale})`,
         }}
       >
         {selectionRect && (

@@ -12,6 +12,9 @@
     "android:install": "adb install -r src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk"
   },
   "dependencies": {
+    "@fontsource/inter": "^5.3.0",
+    "@fontsource/jetbrains-mono": "^5.3.0",
+    "@fontsource/outfit": "^5.3.0",
     "@tauri-apps/api": "^2.12.3",
     "fractional-indexing": "^4.0.0",
     "lucide-react": "^0.400.0",

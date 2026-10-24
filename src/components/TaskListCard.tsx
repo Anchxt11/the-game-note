@@ -136,7 +136,7 @@ export const TaskListCard: React.FC<TaskListCardProps> = ({
       portalPosRef.current = { x: currentLeft, y: currentTop };
 
       if (portalPreviewRef.current) {
-        portalPreviewRef.current.style.transform = `translate3d(${currentLeft}px, ${currentTop}px, 0)`;
+        portalPreviewRef.current.style.transform = `translate(${Math.round(currentLeft)}px, ${Math.round(currentTop)}px)`;
       }
 
       const cardEl = containerRef.current?.closest('.milanote-card') || containerRef.current;
@@ -425,7 +425,7 @@ export const TaskListCard: React.FC<TaskListCardProps> = ({
             position: 'fixed',
             left: 0,
             top: 0,
-            transform: `translate3d(${portalPosRef.current.x}px, ${portalPosRef.current.y}px, 0)`,
+            transform: `translate(${Math.round(portalPosRef.current.x)}px, ${Math.round(portalPosRef.current.y)}px)`,
             width: `${dragRef.current?.origWidth || 320}px`,
             zIndex: 10000000,
             pointerEvents: 'none',

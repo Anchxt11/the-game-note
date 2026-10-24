@@ -99,7 +99,7 @@ export const Toolbar: React.FC<ToolbarProps> = ({
     if (tool === 'note') {
       tempEl.className += ' drag-preview-note';
       tempEl.innerHTML = `
-        <div style="background: #2a2b30; border: 1px solid rgba(255,255,255,0.18); border-radius: 6px; padding: 12px; width: 240px; height: 60px; color: #a5a5ad; font-family: Inter, sans-serif; font-size: 13px; box-shadow: 0 16px 36px rgba(0,0,0,0.85);">
+        <div style="background: #2a2b30; border: 1px solid rgba(255,255,255,0.18); border-radius: 6px; padding: 14px; width: 240px; height: 60px; color: #ffffff; font-family: Inter, sans-serif; font-size: 14px; font-weight: 500; box-shadow: 0 16px 36px rgba(0,0,0,0.85);">
           Start typing...
         </div>
       `;
@@ -107,8 +107,8 @@ export const Toolbar: React.FC<ToolbarProps> = ({
       tempEl.className += ' drag-preview-column';
       tempEl.innerHTML = `
         <div style="background: #232428; border: 1px solid rgba(255,255,255,0.18); border-radius: 8px; width: 300px; height: 130px; display: flex; flex-direction: column; box-shadow: 0 16px 36px rgba(0,0,0,0.85);">
-          <div style="padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.08); font-weight: 600; font-family: Outfit, serif; color: #e1e1e6;">New Column</div>
-          <div style="padding: 16px; color: #6a6a72; font-size: 13px;">0 cards</div>
+          <div style="padding: 12px 16px; border-bottom: 1px solid rgba(255,255,255,0.08); font-weight: 700; font-family: Outfit, sans-serif; color: #ffffff;">New Column</div>
+          <div style="padding: 16px; color: #cbd5e1; font-size: 13px;">0 cards</div>
         </div>
       `;
     } else if (tool === 'nested_board') {
@@ -116,14 +116,14 @@ export const Toolbar: React.FC<ToolbarProps> = ({
       tempEl.innerHTML = `
         <div style="background: #232428; border: 1px solid rgba(255,255,255,0.18); border-radius: 8px; width: 110px; height: 140px; display: flex; flex-direction: column; align-items: center; justify-content: center; box-shadow: 0 16px 36px rgba(0,0,0,0.85);">
           <div style="width: 48px; height: 48px; border-radius: 8px; background: linear-gradient(135deg, #df9a65 0%, #b57338 100%); margin-bottom: 12px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-size: 20px;">B</div>
-          <div style="color: #e1e1e6; font-size: 13px; font-weight: 600;">New Board</div>
+          <div style="color: #ffffff; font-size: 13px; font-weight: 600; font-family: Outfit, sans-serif;">New Board</div>
         </div>
       `;
     } else if (tool === 'task_list') {
       tempEl.className += ' drag-preview-checklist';
       tempEl.innerHTML = `
-        <div style="background: #232428; border: 1px solid rgba(255,255,255,0.18); border-radius: 6px; padding: 12px; width: 280px; box-shadow: 0 16px 36px rgba(0,0,0,0.85); color: #e1e1e6; font-size: 13px;">
-          <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;"><div style="width: 16px; height: 16px; border-radius: 4px; border: 2px solid #52525a;"></div> New checklist item...</div>
+        <div style="background: #232428; border: 1px solid rgba(255,255,255,0.18); border-radius: 6px; padding: 12px; width: 280px; box-shadow: 0 16px 36px rgba(0,0,0,0.85); color: #ffffff; font-size: 14px;">
+          <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 8px;"><div style="width: 16px; height: 16px; border-radius: 4px; border: 2px solid rgba(255,255,255,0.6);"></div> New checklist item...</div>
         </div>
       `;
     } else {

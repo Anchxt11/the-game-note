@@ -21,6 +21,7 @@ import { SyncSettingsModal } from './components/SyncSettingsModal';
 import { isPhoneScreen, isTouchPrimary, isTablet, isAndroidTablet, getDeviceCategory } from './utils/platform';
 import { ipcService, syncService, resolveBoardId, CANONICAL_ROOT_BOARD_ID } from './services/ipc';
 import { imageCache } from './services/imageCache';
+import { getConnectedLinesToDelete, pruneOrphanedLines } from './utils/lineUtils';
 import { listen } from '@tauri-apps/api/event';
 import { 
   Search as SearchIcon, 
@@ -197,7 +198,11 @@ export const App: React.FC = () => {
   const loadElements = useCallback(async (boardId: string) => {
     try {
       const data = await ipcService.getElementsForBoard(boardId);
-      setElements(data);
+      const { validElements, orphanedLineIds } = pruneOrphanedLines(data);
+      if (orphanedLineIds.length > 0) {
+        orphanedLineIds.forEach((id) => ipcService.deleteElement(id).catch(console.error));
+      }
+      setElements(validElements);
       setUndoStack([]);
       setRedoStack([]);
     } catch (e) {
@@ -227,15 +232,19 @@ export const App: React.FC = () => {
     try {
       const activeBoardId = currentBoardIdRef.current;
       const data = await ipcService.getElementsForBoard(activeBoardId);
+      const { validElements, orphanedLineIds } = pruneOrphanedLines(data);
+      if (orphanedLineIds.length > 0) {
+        orphanedLineIds.forEach((id) => ipcService.deleteElement(id).catch(console.error));
+      }
       setElements((prev) => {
         const editingId = editingElementIdRef.current;
         if (editingId) {
           const currentlyEditing = prev.find((e) => e.id === editingId);
           if (currentlyEditing) {
-            return data.map((d) => (d.id === editingId ? currentlyEditing : d));
+            return validElements.map((d) => (d.id === editingId ? currentlyEditing : d));
           }
         }
-        return data;
+        return validElements;
       });
       // Also update board title if it was modified remotely
       try {
@@ -374,6 +383,45 @@ export const App: React.FC = () => {
     }
   }, [refreshCurrentBoardElements]);
 
+  const handleDelete = useCallback(async (idToDelete?: string | string[]) => {
+    let idsToDelete: string[] = [];
+    if (Array.isArray(idToDelete)) {
+      idsToDelete = Array.from(new Set(idToDelete));
+    } else {
+      const targetId = idToDelete || contextMenu?.element?.id || selectedElementId;
+      if (targetId && selectedIds.includes(targetId)) {
+        idsToDelete = Array.from(new Set([...selectedIds, targetId]));
+      } else if (targetId) {
+        idsToDelete = [targetId];
+      } else if (selectedIds.length > 0 || selectedElementId) {
+        idsToDelete = Array.from(new Set([...selectedIds, selectedElementId || ''].filter(Boolean)));
+      }
+    }
+    if (idsToDelete.length === 0) return;
+
+    // Find any connected arrows according to the rules:
+    // 1) The arrow has 2 elements and one of them is deleted -> delete the arrow
+    // 2) The arrow has only 1 element and that element has been deleted -> delete the arrow
+    // Standalone arrows (not connected to 2 elements or 1 element) are preserved!
+    const connectedLineIds = getConnectedLinesToDelete(idsToDelete, elements);
+    const finalIdsToDelete = Array.from(new Set([...idsToDelete, ...connectedLineIds]));
+
+    recordHistory(elements);
+    setElements((prev) => prev.filter((el) => !finalIdsToDelete.includes(el.id)));
+    setSelectedElementId(null);
+    setSelectedIds([]);
+    setEditingElementId(null);
+    setContextMenu(null);
+    for (const delId of finalIdsToDelete) {
+      try {
+        await ipcService.deleteElement(delId);
+      } catch (e) {
+        console.error('Failed to delete element:', e);
+      }
+    }
+    queueDebouncedSync(true);
+  }, [contextMenu, selectedElementId, selectedIds, elements, recordHistory, queueDebouncedSync]);
+
   const handleCopy = useCallback((targetId?: string) => {
     const idsToCopy = selectedIds.length > 0 
       ? selectedIds 
@@ -401,13 +449,8 @@ export const App: React.FC = () => {
     setClipboardElements(copies);
     try { localStorage.setItem('milanote_clipboard', JSON.stringify(copies)); } catch {}
 
-    recordHistory(elements);
-    idsToCopy.forEach((id) => ipcService.deleteElement(id).catch(console.error));
-    setElements((prev) => prev.filter((el) => !idsToCopy.includes(el.id)));
-    setSelectedIds([]);
-    setSelectedElementId(null);
-    setContextMenu(null);
-  }, [selectedIds, selectedElementId, elements, recordHistory, contextMenu]);
+    handleDelete(idsToCopy);
+  }, [selectedIds, selectedElementId, elements, contextMenu, handleDelete]);
 
   const handlePaste = useCallback((targetX?: number, targetY?: number) => {
     if (!clipboardElements || clipboardElements.length === 0) return;
@@ -526,22 +569,14 @@ export const App: React.FC = () => {
         const toDelete = Array.from(new Set([...selectedIds, selectedElementId || ''].filter(Boolean)));
         if (toDelete.length > 0) {
           e.preventDefault();
-          recordHistory(elements);
-          toDelete.forEach((id) => {
-            ipcService.deleteElement(id).catch(console.error);
-          });
-          setElements((prev) => prev.filter((el) => !toDelete.includes(el.id)));
-          setSelectedIds([]);
-          setSelectedElementId(null);
-          setContextMenu(null);
-          setEditingElementId(null);
+          handleDelete(toDelete);
         }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedIds, selectedElementId, editingElementId, elements, handleUndo, handleRedo, recordHistory, handleCopy, handleCut, handlePaste, handleSelectAll]);
+  }, [selectedIds, selectedElementId, editingElementId, elements, handleUndo, handleRedo, recordHistory, handleCopy, handleCut, handlePaste, handleSelectAll, handleDelete]);
 
   const [isElementBeingDragged, setIsElementBeingDragged] = useState(false);
 
@@ -603,7 +638,12 @@ export const App: React.FC = () => {
       }
     }
 
-    setElements((prev) => prev.filter((el) => el.id !== elementId));
+    const connectedLineIds = getConnectedLinesToDelete([elementId], elements);
+    const idsToRemove = [elementId, ...connectedLineIds];
+    setElements((prev) => prev.filter((el) => !idsToRemove.includes(el.id)));
+    for (const lineId of connectedLineIds) {
+      ipcService.deleteElement(lineId).catch(console.error);
+    }
     try {
       await ipcService.updateElementBoardId(elementId, resolvedTargetId);
       if (isEnterHover && x !== undefined && y !== undefined && elToMove) {
@@ -819,34 +859,6 @@ export const App: React.FC = () => {
     setElements((prev) => [...prev, newEl]);
     setSelectedElementId(newEl.id);
     setSelectedIds([newEl.id]);
-    queueDebouncedSync(true);
-  };
-
-  const handleDelete = async (idToDelete?: string) => {
-    const targetId = idToDelete || contextMenu?.element?.id || selectedElementId;
-    let idsToDelete: string[] = [];
-    if (targetId && selectedIds.includes(targetId)) {
-      idsToDelete = Array.from(new Set([...selectedIds, targetId]));
-    } else if (targetId) {
-      idsToDelete = [targetId];
-    } else if (selectedIds.length > 0 || selectedElementId) {
-      idsToDelete = Array.from(new Set([...selectedIds, selectedElementId || ''].filter(Boolean)));
-    }
-    if (idsToDelete.length === 0) return;
-
-    recordHistory(elements);
-    setElements((prev) => prev.filter((el) => !idsToDelete.includes(el.id)));
-    setSelectedElementId(null);
-    setSelectedIds([]);
-    setEditingElementId(null);
-    setContextMenu(null);
-    for (const delId of idsToDelete) {
-      try {
-        await ipcService.deleteElement(delId);
-      } catch (e) {
-        console.error('Failed to delete element:', e);
-      }
-    }
     queueDebouncedSync(true);
   };
 
