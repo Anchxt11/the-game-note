@@ -272,6 +272,12 @@ const NoteRichEditorComponent: React.FC<NoteRichEditorComponentProps> = ({
           }
         }
       }}
+      onPointerDown={(e) => {
+        const target = e.target as HTMLElement;
+        if (isEditing || target.closest('a') || target.closest('.milanote-inline-comment')) {
+          e.stopPropagation();
+        }
+      }}
       onMouseDown={(e) => {
         const target = e.target as HTMLElement;
         if (isEditing || target.closest('a') || target.closest('.milanote-inline-comment')) {
@@ -624,18 +630,22 @@ const ImageCard: React.FC<ImageCardProps> = ({
       )}
       {Boolean(el.content?.show_caption) && (
         <div 
-          style={{ background: 'rgb(51, 51, 51)', padding: '8px 12px', width: '100%', minHeight: '56px', display: 'flex', flexDirection: 'column', justifyContent: 'center', cursor: isEditing ? 'text' : 'pointer' }} 
+          style={{ background: 'rgb(51, 51, 51)', padding: '8px 12px', width: '100%', minHeight: '56px', display: 'flex', flexDirection: 'column', justifyContent: 'center', cursor: isEditing ? 'text' : 'pointer', userSelect: isEditing ? 'text' : 'none', WebkitUserSelect: isEditing ? 'text' : 'none' }} 
+          onPointerDown={(e) => {
+            if (isEditing) e.stopPropagation();
+          }}
           onMouseDown={(e) => {
-            e.stopPropagation();
-            if (isSelected) onSelectElement(el.id);
+            if (isEditing) e.stopPropagation();
           }}
           onDoubleClick={(e) => {
             e.stopPropagation();
             onSetEditingElement(el.id);
           }}
           onClick={(e) => {
-            e.stopPropagation();
-            if (!isEditing) onSetEditingElement(el.id);
+            if (isSelected && !isEditing) {
+              e.stopPropagation();
+              onSetEditingElement(el.id);
+            }
           }}
         >
           <ImageCaptionEditorComponent
@@ -1360,6 +1370,10 @@ export const Canvas: React.FC<CanvasProps> = ({
     visible: false,
   });
   const zoomOsdTimerRef = useRef<number | null>(null);
+  const lastDoubleClickTimeRef = useRef<number>(0);
+  const lastTouchTimeRef = useRef<number>(0);
+  const elementSelectedAtPointerDownRef = useRef<boolean>(false);
+  const lastElementTapRef = useRef<{ id: string; time: number; x: number; y: number } | null>(null);
 
   const triggerZoomOsd = useCallback((newScale: number) => {
     setZoomOsd({ scale: newScale, visible: true });
@@ -1445,14 +1459,28 @@ export const Canvas: React.FC<CanvasProps> = ({
   }, [pan.x, pan.y, scale]);
 
   const isTouchHoldContextMenu = useCallback((e: React.MouseEvent) => {
-    if (getDeviceCategory() === 'phone') return true;
+    // Suppress if double-click/double-tap just happened (e.g. user double-tapped to edit text)
+    if (Date.now() - lastDoubleClickTimeRef.current < 1000) return true;
+
+    // Suppress if user is currently editing text in any element
+    if (editingElementId) return true;
+
+    // Suppress if event was touch-initiated or occurred within 1.5s of a touch gesture
     const native = e.nativeEvent as any;
-    if (e.button === 2) return false;
-    if (native?.pointerType === 'touch' || native?.pointerType === 'pen') return true;
+    const isTouchSource = Boolean(
+      native?.sourceCapabilities?.firesTouchEvents ||
+      native?.pointerType === 'touch' ||
+      native?.pointerType === 'pen' ||
+      (Date.now() - lastTouchTimeRef.current < 1500)
+    );
+
+    if (isTouchSource || isTouchPrimary()) return true;
+    if (getDeviceCategory() === 'phone') return true;
+    if (e.button === 2 && !isTouchSource) return false;
     if (isTouchSelectingRef.current) return true;
     if (pointersRef.current.size === 1) return true;
     return false;
-  }, []);
+  }, [editingElementId]);
 
   const getPanLimits = useCallback((vpWidth: number, vpHeight: number, currentScale: number) => {
     const activeEls = elements.filter(
@@ -2105,6 +2133,9 @@ export const Canvas: React.FC<CanvasProps> = ({
   }, [clampPan, runZoomAnimationTick, triggerZoomOsd]);
 
   const handlePointerDown = (e: React.PointerEvent | React.MouseEvent) => {
+    if ((e as any).pointerType === 'touch' || (e as any).pointerType === 'pen' || 'touches' in e) {
+      lastTouchTimeRef.current = Date.now();
+    }
     const nowDown = Date.now();
     if (e.type === 'mousedown' && nowDown - lastCanvasDownTimeRef.current < 250) {
       return;
@@ -2354,6 +2385,7 @@ export const Canvas: React.FC<CanvasProps> = ({
   };
 
   const handleDoubleClick = (e: React.MouseEvent) => {
+    lastDoubleClickTimeRef.current = Date.now();
     const target = e.target as HTMLElement;
     if (target === containerRef.current || target.classList.contains('canvas-viewport') || target.classList.contains('canvas-plane') || target.classList.contains('canvas-viewport-grid')) {
       e.preventDefault();
@@ -2499,8 +2531,32 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
 
     let foundBoardId: string | null = null;
+    const draggedBoardTargetId = draggedEl?.content?.target_board_id || draggedEl?.content?.shortcut_target_id;
+
     elements.forEach((other) => {
-      if (other.id === elementId || other.element_type !== 'nested_board') return;
+      if (other.element_type !== 'nested_board') return;
+      if (other.id === elementId) return;
+      if (dragGroup.some((g) => g.id === other.id)) return;
+
+      // Column cannot be dropped into a board inside that column
+      if (other.style?.parent_column_id && dragGroup.some((g) => g.id === other.style?.parent_column_id)) {
+        return;
+      }
+      if (draggedEl?.element_type === 'column' && other.style?.parent_column_id === draggedEl.id) {
+        return;
+      }
+
+      // Board cannot be dropped into itself or another instance/shortcut of the same board
+      if (draggedEl?.element_type === 'nested_board') {
+        const otherBoardTargetId = other.content?.target_board_id || other.content?.shortcut_target_id;
+        if (draggedBoardTargetId && otherBoardTargetId && draggedBoardTargetId === otherBoardTargetId) {
+          return;
+        }
+        if (other.content?.shortcut_target_id === draggedEl.id || draggedEl.content?.shortcut_target_id === other.id) {
+          return;
+        }
+      }
+
       const bDiv = document.getElementById(`milanote-el-${other.id}`);
       if (bDiv) {
         const rect = bDiv.getBoundingClientRect();
@@ -2515,7 +2571,13 @@ export const Canvas: React.FC<CanvasProps> = ({
         const rect = bEl.getBoundingClientRect();
         if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) {
           const bId = bEl.getAttribute('data-board-id');
-          if (bId && bId !== elementId) {
+          if (bId && bId !== elementId && bId !== draggedBoardTargetId) {
+            if (draggedEl?.element_type === 'column') {
+              const hasChildBoard = elements.some(
+                (c) => c.style?.parent_column_id === draggedEl.id && (c.id === bId || c.content?.target_board_id === bId)
+              );
+              if (hasChildBoard) return;
+            }
             foundBoardId = bId;
           }
         }
@@ -3468,9 +3530,20 @@ export const Canvas: React.FC<CanvasProps> = ({
 
       let activeTargetBoardId = hoveredBoardIdRef.current || hoveredBoardId;
       if (!activeTargetBoardId && !isResize) {
+        const firstDragged = dragGroup.length > 0 ? elements.find((x) => x.id === dragGroup[0].id) : null;
+        const draggedBoardTargetId = firstDragged?.content?.target_board_id || firstDragged?.content?.shortcut_target_id;
+
         elements.forEach((other) => {
           if (other.element_type !== 'nested_board') return;
           if (dragGroup.some(g => g.id === other.id)) return;
+          if (other.style?.parent_column_id && dragGroup.some(g => g.id === other.style?.parent_column_id)) return;
+          if (firstDragged?.element_type === 'column' && other.style?.parent_column_id === firstDragged.id) return;
+          if (firstDragged?.element_type === 'nested_board') {
+            const otherBoardTargetId = other.content?.target_board_id || other.content?.shortcut_target_id;
+            if (draggedBoardTargetId && otherBoardTargetId && draggedBoardTargetId === otherBoardTargetId) return;
+            if (other.content?.shortcut_target_id === firstDragged.id || firstDragged.content?.shortcut_target_id === other.id) return;
+          }
+
           const bDiv = document.getElementById(`milanote-el-${other.id}`);
           if (bDiv) {
             const rect = bDiv.getBoundingClientRect();
@@ -3672,6 +3745,7 @@ export const Canvas: React.FC<CanvasProps> = ({
   useEffect(() => {
     const handleWindowPointerDownCapture = (e: PointerEvent) => {
       if (e.pointerType === 'touch' || e.pointerType === 'pen') {
+        lastTouchTimeRef.current = Date.now();
         pointersRef.current.set(e.pointerId, {
           clientX: e.clientX,
           clientY: e.clientY,
@@ -3949,6 +4023,7 @@ export const Canvas: React.FC<CanvasProps> = ({
 
     const isTouch = (e as any).pointerType === 'touch' || ('touches' in e && (e as any).touches?.length > 0) || isTouchPrimary();
     if (isTouch) {
+      lastTouchTimeRef.current = Date.now();
       if (
         Date.now() - lastPinchEndTimeRef.current < 300 ||
         pinchStateRef.current ||
@@ -4065,6 +4140,9 @@ export const Canvas: React.FC<CanvasProps> = ({
     const offsetY = e.clientY - rect.top;
 
     dragOccurredRef.current = false;
+
+    const wasAlreadySelected = selectedElementId === element.id || selectedIds.includes(element.id);
+    elementSelectedAtPointerDownRef.current = wasAlreadySelected;
 
     if (!isResize) {
       if (!selectedIds.includes(element.id) || selectedIds.length <= 1) {
@@ -4398,11 +4476,19 @@ export const Canvas: React.FC<CanvasProps> = ({
       const boardBg = el.style?.board_gradient || el.style?.board_color || badge.badgeBg;
 
       if (inColumn) {
+        const isSelected = selectedElementId === el.id || selectedIds.includes(el.id);
         return (
           <div
             id={`milanote-el-${el.id}`}
-            className={`column-board-row column-inner-card ${selectedElementId === el.id ? 'selected' : ''} ${activeDragId === el.id ? 'dragging' : ''} ${(hoveredBoardId === el.id || (el.content?.target_board_id && hoveredBoardId === el.content.target_board_id)) ? 'hover-enter-target' : ''}`}
+            className={`column-board-row column-inner-card ${isSelected ? 'selected' : ''} ${isEditing ? 'editing' : ''} ${activeDragId === el.id ? 'dragging' : ''} ${(hoveredBoardId === el.id || (el.content?.target_board_id && hoveredBoardId === el.content.target_board_id)) ? 'hover-enter-target' : ''}`}
             style={activeDragId === el.id && dragRef.current?.hasExceededThreshold && !dragRef.current?.isResize ? { zIndex: 999999 } : undefined}
+            onPointerDown={(e) => {
+              if (customMouseDown) {
+                customMouseDown(e as any, el);
+              } else {
+                handleElementMouseDown(e, el, false, undefined, true);
+              }
+            }}
             onMouseDown={(e) => {
               if (customMouseDown) {
                 customMouseDown(e, el);
@@ -4410,7 +4496,37 @@ export const Canvas: React.FC<CanvasProps> = ({
                 handleElementMouseDown(e, el, false, undefined, true);
               }
             }}
-            onDoubleClick={(e) => { e.stopPropagation(); onOpenBoard(el.content.shortcut_target_id || el.id); }}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (Date.now() - lastPinchEndTimeRef.current < 300) return;
+              if (dragOccurredRef.current) {
+                dragOccurredRef.current = false;
+                return;
+              }
+              if (e.ctrlKey || e.metaKey || isSpacePressedRef.current) return;
+              const now = Date.now();
+              const isDoubleTapOnEl = Boolean(
+                lastElementTapRef.current &&
+                lastElementTapRef.current.id === el.id &&
+                (now - lastElementTapRef.current.time < 380) &&
+                (Math.hypot(e.clientX - lastElementTapRef.current.x, e.clientY - lastElementTapRef.current.y) < 35)
+              );
+              lastElementTapRef.current = { id: el.id, time: now, x: e.clientX, y: e.clientY };
+              if (isDoubleTapOnEl) {
+                lastDoubleClickTimeRef.current = now;
+                onOpenBoard(el.content.shortcut_target_id || el.id);
+                return;
+              }
+              if (selectedElementId !== el.id || selectedIds.length > 1) {
+                onSelectElement(el.id);
+                if (onMultiSelect) onMultiSelect([el.id]);
+              }
+            }}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              lastDoubleClickTimeRef.current = Date.now();
+              onOpenBoard(el.content.shortcut_target_id || el.id);
+            }}
             onContextMenu={(e) => {
               e.preventDefault();
               e.stopPropagation();
@@ -4442,7 +4558,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                 </div>
               )}
             </div>
-            {selectedElementId === el.id && (
+            {isSelected && (
               <div
                 className="card-quick-connect-handle"
                 title="Drag to connect"
@@ -4463,6 +4579,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                   defaultValue={el.content.title || 'New Board'}
                   onClick={(e) => e.stopPropagation()}
                   onMouseDown={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => e.stopPropagation()}
                   onDoubleClick={(e) => e.stopPropagation()}
                   onBlur={(e) => {
                     onContentChange(el.id, { ...el.content, title: e.target.value });
@@ -4477,7 +4594,17 @@ export const Canvas: React.FC<CanvasProps> = ({
               ) : (
                 <div 
                   className="column-board-title" 
-                  onDoubleClick={(e) => { e.stopPropagation(); onSetEditingElement(el.id); }}
+                  onClick={(e) => {
+                    if (isSelected && elementSelectedAtPointerDownRef.current && !dragOccurredRef.current) {
+                      e.stopPropagation();
+                      onSetEditingElement(el.id);
+                    }
+                  }}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    lastDoubleClickTimeRef.current = Date.now();
+                    onSetEditingElement(el.id);
+                  }}
                   title="Double-click name to rename board"
                 >
                   {el.content.title || 'New Board'}
@@ -4505,8 +4632,16 @@ export const Canvas: React.FC<CanvasProps> = ({
         );
       }
 
+      const isLinkSelected = selectedElementId === el.id || selectedIds.includes(el.id);
       return (
-        <div className="link-card-content" onDoubleClick={(e) => { e.stopPropagation(); onSetEditingElement(el.id); }}>
+        <div 
+          className="link-card-content" 
+          onDoubleClick={(e) => { 
+            e.stopPropagation(); 
+            lastDoubleClickTimeRef.current = Date.now(); 
+            onSetEditingElement(el.id); 
+          }}
+        >
           <LinkIcon size={18} color="#73747d" />
           <input
             type="text"
@@ -4514,6 +4649,16 @@ export const Canvas: React.FC<CanvasProps> = ({
             autoFocus={isEditing}
             value={el.content.url || ''}
             readOnly={!isEditing}
+            onPointerDown={(e) => { if (isEditing) e.stopPropagation(); }}
+            onMouseDown={(e) => { if (isEditing) e.stopPropagation(); }}
+            onClick={(e) => {
+              if (isEditing) {
+                e.stopPropagation();
+              } else if (isLinkSelected && elementSelectedAtPointerDownRef.current && !dragOccurredRef.current) {
+                e.stopPropagation();
+                onSetEditingElement(el.id);
+              }
+            }}
             onChange={(e) => onContentChange(el.id, { ...el.content, url: e.target.value })}
             onBlur={() => onSetEditingElement?.(null)}
             onKeyDown={(e) => {
@@ -4972,10 +5117,47 @@ export const Canvas: React.FC<CanvasProps> = ({
     const isLightBg = isLightColor(el.style?.background_color);
     const textColor = isLightBg ? '#1e293b' : '#ffffff';
 
+    const isCardSelected = selectedElementId === el.id || selectedIds.includes(el.id);
+
     return (
       <div 
-        style={{ width: '100%', height: '100%', minHeight: '26px', cursor: isEditing ? 'text' : 'grab', position: 'relative', color: textColor, display: 'flex', flexDirection: 'column' }} 
-        onDoubleClick={(e) => { e.stopPropagation(); onSetEditingElement(el.id); }}
+        style={{
+          width: '100%',
+          height: '100%',
+          minHeight: '26px',
+          cursor: isEditing ? 'text' : 'grab',
+          position: 'relative',
+          color: textColor,
+          display: 'flex',
+          flexDirection: 'column',
+          userSelect: isEditing ? 'text' : 'none',
+          WebkitUserSelect: isEditing ? 'text' : 'none',
+        }} 
+        onClick={(e) => {
+          const now = Date.now();
+          const isDoubleTapOnEl = Boolean(
+            lastElementTapRef.current &&
+            lastElementTapRef.current.id === el.id &&
+            (now - lastElementTapRef.current.time < 380) &&
+            (Math.hypot(e.clientX - lastElementTapRef.current.x, e.clientY - lastElementTapRef.current.y) < 35)
+          );
+          lastElementTapRef.current = { id: el.id, time: now, x: e.clientX, y: e.clientY };
+          if (isDoubleTapOnEl) {
+            e.stopPropagation();
+            lastDoubleClickTimeRef.current = now;
+            onSetEditingElement(el.id);
+            return;
+          }
+          if (isCardSelected && elementSelectedAtPointerDownRef.current && !isEditing && !dragOccurredRef.current) {
+            e.stopPropagation();
+            onSetEditingElement(el.id);
+          }
+        }}
+        onDoubleClick={(e) => {
+          e.stopPropagation();
+          lastDoubleClickTimeRef.current = Date.now();
+          onSetEditingElement(el.id);
+        }}
       >
         <NoteRichEditorComponent
           key={el.id}
@@ -5028,7 +5210,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         <div
           key={el.id}
           id={`milanote-el-${el.id}`}
-            className={`milanote-card column-card ${isSelected ? 'selected' : ''} ${isDragging ? 'dragging' : ''} ${isCollapsed ? 'collapsed' : ''} ${inColumn ? 'column-inner-card' : ''}`}
+            className={`milanote-card column-card ${isSelected ? 'selected' : ''} ${isEditing ? 'editing' : ''} ${isDragging ? 'dragging' : ''} ${isCollapsed ? 'collapsed' : ''} ${inColumn ? 'column-inner-card' : ''}`}
             style={inColumn ? {
               backgroundColor: el.style?.background_color || undefined,
               color: isLightColor(el.style?.background_color) ? '#2d3340' : undefined,
@@ -5058,6 +5240,19 @@ export const Canvas: React.FC<CanvasProps> = ({
                 return;
               }
               if (e.ctrlKey || e.metaKey || isSpacePressedRef.current) return;
+              const now = Date.now();
+              const isDoubleTapOnEl = Boolean(
+                lastElementTapRef.current &&
+                lastElementTapRef.current.id === el.id &&
+                (now - lastElementTapRef.current.time < 380) &&
+                (Math.hypot(e.clientX - lastElementTapRef.current.x, e.clientY - lastElementTapRef.current.y) < 35)
+              );
+              lastElementTapRef.current = { id: el.id, time: now, x: e.clientX, y: e.clientY };
+              if (isDoubleTapOnEl) {
+                lastDoubleClickTimeRef.current = now;
+                onSetEditingElement(el.id);
+                return;
+              }
               if (selectedElementId !== el.id || selectedIds.length > 1) {
                 onSelectElement(el.id);
                 if (onMultiSelect) onMultiSelect([el.id]);
@@ -5074,15 +5269,51 @@ export const Canvas: React.FC<CanvasProps> = ({
               <div className="note-top-strip-bar" style={{ backgroundColor: el.style?.top_strip_color }} />
             )}
             <div className="column-header">
-              <input
-                className="column-title-serif"
-                defaultValue={el.content.title || 'New Column'}
-                onBlur={(e) => onContentChange(el.id, { ...el.content, title: e.target.value })}
-                onClick={(e) => e.stopPropagation()}
-                onMouseDown={(e) => e.stopPropagation()}
-                ref={(input) => { if (editingElementId === el.id && input) input.focus(); }}
-                style={{ color: isLightColor(el.style?.background_color) ? '#2d3340' : undefined }}
-              />
+              {isEditing ? (
+                <input
+                  key={`col-title-${el.id}`}
+                  className="column-title-serif editing"
+                  defaultValue={el.content.title || 'New Column'}
+                  autoFocus
+                  onBlur={(e) => {
+                    onContentChange(el.id, { ...el.content, title: e.target.value });
+                    onSetEditingElement(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === 'Escape') {
+                      e.currentTarget.blur();
+                    }
+                  }}
+                  onClick={(e) => e.stopPropagation()}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  ref={(input) => { if (input) input.focus(); }}
+                  style={{ color: isLightColor(el.style?.background_color) ? '#2d3340' : undefined }}
+                />
+              ) : (
+                <div
+                  className="column-title-serif"
+                  style={{
+                    color: isLightColor(el.style?.background_color) ? '#2d3340' : undefined,
+                    userSelect: 'none',
+                    WebkitUserSelect: 'none',
+                    cursor: isSelected ? 'text' : 'grab',
+                  }}
+                  onClick={(e) => {
+                    if (isSelected && elementSelectedAtPointerDownRef.current && !dragOccurredRef.current) {
+                      e.stopPropagation();
+                      onSetEditingElement(el.id);
+                    }
+                  }}
+                  onDoubleClick={(e) => {
+                    e.stopPropagation();
+                    lastDoubleClickTimeRef.current = Date.now();
+                    onSetEditingElement(el.id);
+                  }}
+                >
+                  {el.content.title || 'New Column'}
+                </div>
+              )}
               <div className="column-subtitle-cards" style={{ color: isLightColor(el.style?.background_color) ? '#4a5568' : undefined }}>{countSubtitle}</div>
 
               <button
@@ -5203,7 +5434,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         <div
           key={el.id}
           id={`milanote-el-${el.id}`}
-            className={`board-card-vertical ${isSelected ? 'selected' : ''} ${isDragging ? 'dragging' : ''} ${(hoveredBoardId === el.id || (el.content?.target_board_id && hoveredBoardId === el.content.target_board_id)) ? 'hover-enter-target' : ''}`}
+            className={`board-card-vertical ${isSelected ? 'selected' : ''} ${isEditing ? 'editing' : ''} ${isDragging ? 'dragging' : ''} ${(hoveredBoardId === el.id || (el.content?.target_board_id && hoveredBoardId === el.content.target_board_id)) ? 'hover-enter-target' : ''}`}
             style={{
               transform: boardTransform,
               position: 'absolute',
@@ -5211,6 +5442,7 @@ export const Canvas: React.FC<CanvasProps> = ({
               left: 0,
               zIndex: isDragging ? 99999 : (el.z_index || 10),
               userSelect: 'none',
+              WebkitUserSelect: 'none',
               opacity: 1,
             }}
             onPointerDown={(e) => {
@@ -5220,7 +5452,11 @@ export const Canvas: React.FC<CanvasProps> = ({
                 handleElementMouseDown(e, el, false, undefined, false);
               }
             }}
-            onDoubleClick={(e) => { e.stopPropagation(); onOpenBoard(el.content.shortcut_target_id || el.id); }}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              lastDoubleClickTimeRef.current = Date.now();
+              onOpenBoard(el.content.shortcut_target_id || el.id);
+            }}
             onClick={(e) => {
               e.stopPropagation();
               if (Date.now() - lastPinchEndTimeRef.current < 300) return;
@@ -5229,6 +5465,19 @@ export const Canvas: React.FC<CanvasProps> = ({
                 return;
               }
               if (e.ctrlKey || e.metaKey || isSpacePressedRef.current) return;
+              const now = Date.now();
+              const isDoubleTapOnEl = Boolean(
+                lastElementTapRef.current &&
+                lastElementTapRef.current.id === el.id &&
+                (now - lastElementTapRef.current.time < 380) &&
+                (Math.hypot(e.clientX - lastElementTapRef.current.x, e.clientY - lastElementTapRef.current.y) < 35)
+              );
+              lastElementTapRef.current = { id: el.id, time: now, x: e.clientX, y: e.clientY };
+              if (isDoubleTapOnEl) {
+                lastDoubleClickTimeRef.current = now;
+                onOpenBoard(el.content.shortcut_target_id || el.id);
+                return;
+              }
               if (selectedElementId !== el.id || selectedIds.length > 1) {
                 onSelectElement(el.id);
                 if (onMultiSelect) onMultiSelect([el.id]);
@@ -5286,6 +5535,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                 defaultValue={el.content.title || 'New Board'}
                 onClick={(e) => e.stopPropagation()}
                 onMouseDown={(e) => e.stopPropagation()}
+                onPointerDown={(e) => e.stopPropagation()}
                 onDoubleClick={(e) => e.stopPropagation()}
                 onBlur={(e) => {
                   onContentChange(el.id, { ...el.content, title: e.target.value });
@@ -5300,7 +5550,17 @@ export const Canvas: React.FC<CanvasProps> = ({
             ) : (
               <div 
                 className="board-title-text" 
-                onDoubleClick={(e) => { e.stopPropagation(); onSetEditingElement(el.id); }}
+                onClick={(e) => {
+                  if (isSelected && elementSelectedAtPointerDownRef.current && !dragOccurredRef.current) {
+                    e.stopPropagation();
+                    onSetEditingElement(el.id);
+                  }
+                }}
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  lastDoubleClickTimeRef.current = Date.now();
+                  onSetEditingElement(el.id);
+                }}
                 title="Double-click name to rename board"
               >
                 {el.content.title || 'New Board'}
@@ -5339,7 +5599,7 @@ export const Canvas: React.FC<CanvasProps> = ({
       <div
         key={el.id}
         id={`milanote-el-${el.id}`}
-        className={`milanote-card ${isSelected ? 'selected' : ''} ${isDragging ? 'dragging' : ''} ${inColumn ? 'column-inner-card' : ''} ${el.element_type === 'note' ? 'note-card-wrapper' : ''} ${el.element_type === 'task_list' ? 'task-list-card-wrapper' : ''} ${el.element_type === 'image' ? 'image-card-wrapper' : ''} ${el.element_type === 'image' && el.style?.is_transparent ? 'image-transparent' : ''} ${el.element_type === 'link' ? 'link-card-wrapper' : ''} ${el.element_type === 'link' && !Boolean(el.content?.url && el.content.url.trim().length > 0) ? 'link-empty-wrapper' : ''} ${el.element_type === 'table' ? 'table-card-wrapper' : ''} ${isComment ? 'comment-card-wrapper' : ''} ${dragOverTaskListId === el.id ? 'task-list-merge-target' : ''}`}
+        className={`milanote-card ${isSelected ? 'selected' : ''} ${isEditing ? 'editing' : ''} ${isDragging ? 'dragging' : ''} ${inColumn ? 'column-inner-card' : ''} ${el.element_type === 'note' ? 'note-card-wrapper' : ''} ${el.element_type === 'task_list' ? 'task-list-card-wrapper' : ''} ${el.element_type === 'image' ? 'image-card-wrapper' : ''} ${el.element_type === 'image' && el.style?.is_transparent ? 'image-transparent' : ''} ${el.element_type === 'link' ? 'link-card-wrapper' : ''} ${el.element_type === 'link' && !Boolean(el.content?.url && el.content.url.trim().length > 0) ? 'link-empty-wrapper' : ''} ${el.element_type === 'table' ? 'table-card-wrapper' : ''} ${isComment ? 'comment-card-wrapper' : ''} ${dragOverTaskListId === el.id ? 'task-list-merge-target' : ''}`}
         style={inColumn ? {
           backgroundColor: customBg || undefined,
           color: useDarkText ? '#2d3340' : undefined,
@@ -5363,7 +5623,18 @@ export const Canvas: React.FC<CanvasProps> = ({
               handleElementMouseDown(e, el, false, undefined, inColumn);
             }
           }}
-          onDoubleClick={(e) => { e.stopPropagation(); onSetEditingElement(el.id); }}
+          onMouseDown={(e) => {
+            if (customMouseDown) {
+              customMouseDown(e, el);
+            } else {
+              handleElementMouseDown(e, el, false, undefined, inColumn);
+            }
+          }}
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            lastDoubleClickTimeRef.current = Date.now();
+            onSetEditingElement(el.id);
+          }}
           onClick={(e) => {
             e.stopPropagation();
             if (Date.now() - lastPinchEndTimeRef.current < 300) return;
@@ -5372,6 +5643,21 @@ export const Canvas: React.FC<CanvasProps> = ({
               return;
             }
             if (e.ctrlKey || e.metaKey || isSpacePressedRef.current) return;
+            const now = Date.now();
+            const isDoubleTapOnEl = Boolean(
+              lastElementTapRef.current &&
+              lastElementTapRef.current.id === el.id &&
+              (now - lastElementTapRef.current.time < 380) &&
+              (Math.hypot(e.clientX - lastElementTapRef.current.x, e.clientY - lastElementTapRef.current.y) < 35)
+            );
+            lastElementTapRef.current = { id: el.id, time: now, x: e.clientX, y: e.clientY };
+            if (isDoubleTapOnEl) {
+              lastDoubleClickTimeRef.current = now;
+              if (!isEditing) {
+                onSetEditingElement(el.id);
+              }
+              return;
+            }
             if (selectedElementId !== el.id || selectedIds.length > 1) {
               onSelectElement(el.id);
               if (onMultiSelect) onMultiSelect([el.id]);
@@ -5885,6 +6171,7 @@ export const Canvas: React.FC<CanvasProps> = ({
               onTouchStart={(evt) => evt.stopPropagation()}
               onDoubleClick={(evt) => {
                 evt.stopPropagation();
+                lastDoubleClickTimeRef.current = Date.now();
                 setEditingLineLabelId(el.id);
               }}
             >

@@ -662,7 +662,10 @@ body, html, #root {
   text-rendering: geometricPrecision;
 }
 
-.milanote-card.selected {
+.milanote-card.selected,
+.column-inner-card.selected,
+.column-board-row.selected,
+.board-card-vertical.selected {
   border: 1.5px solid #ffffff !important;
   box-shadow: none !important;
 }
@@ -974,11 +977,13 @@ body, html, #root {
   justify-content: center;
   width: auto;
   height: auto;
-  padding: 4px;
+  padding: 6px 8px;
+  box-sizing: border-box;
+  border-radius: 8px;
   cursor: grab;
   transition: none !important;
   background: transparent !important;
-  border: none !important;
+  border: 1.5px solid transparent;
   box-shadow: none !important;
 }
 
@@ -1178,7 +1183,7 @@ body, html, #root {
   width: 100% !important;
   margin-bottom: 0 !important;
   background-color: var(--milanote-card-bg) !important;
-  border: 1px solid var(--milanote-card-border) !important;
+  border: 1px solid var(--milanote-card-border);
   box-shadow: none !important;
 }
 
@@ -1195,6 +1200,7 @@ body, html, #root {
   border-radius: 0 !important;
   cursor: grab;
   user-select: none;
+  -webkit-user-select: none;
   box-shadow: none !important;
   width: 100% !important;
   transition: none !important;
@@ -1202,6 +1208,12 @@ body, html, #root {
   top: auto !important;
   left: auto !important;
   transform: none !important;
+  box-sizing: border-box;
+}
+
+.column-board-row.selected,
+.column-inner-card.column-board-row.selected {
+  border: 1.5px solid #ffffff !important;
 }
 
 .column-board-row:hover {
@@ -3750,7 +3762,27 @@ body, html, #root {
   background: #5b7bb3;
 }
 
-/* Prevent text selection and interaction on card contents unless the card is selected */
+/* Prevent text selection unless the card is in active editing mode */
+.milanote-card:not(.editing) input,
+.milanote-card:not(.editing) textarea,
+.milanote-card:not(.editing) [contenteditable="true"],
+.milanote-card:not(.editing) img,
+.milanote-card:not(.editing) .note-rich-editor,
+.column-inner-card:not(.editing) input,
+.column-inner-card:not(.editing) textarea,
+.column-inner-card:not(.editing) [contenteditable="true"],
+.column-inner-card:not(.editing) img,
+.column-inner-card:not(.editing) .note-rich-editor,
+.board-card-vertical:not(.editing) input,
+.board-card-vertical:not(.editing) textarea,
+.board-card-vertical:not(.editing) [contenteditable="true"],
+.board-card-vertical:not(.editing) img,
+.board-card-vertical:not(.editing) .note-rich-editor {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+/* Prevent pointer interaction on unselected card contents so card can be moved easily */
 .milanote-card:not(.selected):not(.editing) input,
 .milanote-card:not(.selected):not(.editing) textarea,
 .milanote-card:not(.selected):not(.editing) [contenteditable="true"],
@@ -3767,34 +3799,48 @@ body, html, #root {
 .board-card-vertical:not(.selected):not(.editing) img,
 .board-card-vertical:not(.selected):not(.editing) .note-rich-editor {
   pointer-events: none;
-  user-select: none;
-  -webkit-user-select: none;
 }
 
-/* Ensure inner cards that are selected or editing bypass the parent's disabled state */
-.milanote-card.selected input,
-.milanote-card.selected textarea,
-.milanote-card.selected [contenteditable="true"],
-.milanote-card.selected img,
-.milanote-card.selected .note-rich-editor,
+/* Selected cards allow pointer-events for clicking into text, but preserve user-select: none to allow dragging */
+.milanote-card.selected:not(.editing) input,
+.milanote-card.selected:not(.editing) textarea,
+.milanote-card.selected:not(.editing) [contenteditable="true"],
+.milanote-card.selected:not(.editing) img,
+.milanote-card.selected:not(.editing) .note-rich-editor,
+.column-inner-card.selected:not(.editing) input,
+.column-inner-card.selected:not(.editing) textarea,
+.column-inner-card.selected:not(.editing) [contenteditable="true"],
+.column-inner-card.selected:not(.editing) img,
+.column-inner-card.selected:not(.editing) .note-rich-editor,
+.board-card-vertical.selected:not(.editing) input,
+.board-card-vertical.selected:not(.editing) textarea,
+.board-card-vertical.selected:not(.editing) [contenteditable="true"],
+.board-card-vertical.selected:not(.editing) img,
+.board-card-vertical.selected:not(.editing) .note-rich-editor {
+  pointer-events: auto !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+/* Only cards in editing mode allow full text selection and typing interaction */
 .milanote-card.editing input,
 .milanote-card.editing textarea,
 .milanote-card.editing [contenteditable="true"],
 .milanote-card.editing img,
 .milanote-card.editing .note-rich-editor,
-.column-inner-card.selected input,
-.column-inner-card.selected textarea,
-.column-inner-card.selected [contenteditable="true"],
-.column-inner-card.selected img,
-.column-inner-card.selected .note-rich-editor,
 .column-inner-card.editing input,
 .column-inner-card.editing textarea,
 .column-inner-card.editing [contenteditable="true"],
 .column-inner-card.editing img,
-.column-inner-card.editing .note-rich-editor {
+.column-inner-card.editing .note-rich-editor,
+.board-card-vertical.editing input,
+.board-card-vertical.editing textarea,
+.board-card-vertical.editing [contenteditable="true"],
+.board-card-vertical.editing img,
+.board-card-vertical.editing .note-rich-editor {
   pointer-events: auto !important;
-  user-select: auto !important;
-  -webkit-user-select: auto !important;
+  user-select: text !important;
+  -webkit-user-select: text !important;
 }
 
 /* Text Style Popover */

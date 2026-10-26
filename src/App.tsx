@@ -638,6 +638,23 @@ export const App: React.FC = () => {
       }
     }
 
+    // Safety checks: Board cannot move into itself, column cannot move into its own child board
+    if (elToMove.id === resolvedTargetId || elToMove.id === boardElement?.id) return;
+    if (resolvedTargetId === currentBoardId) return;
+    if (elToMove.element_type === 'nested_board') {
+      const myTargetBoardId = elToMove.content?.target_board_id || elToMove.content?.shortcut_target_id;
+      if (myTargetBoardId && (myTargetBoardId === resolvedTargetId || (boardElement && myTargetBoardId === boardElement.content?.target_board_id))) {
+        return;
+      }
+    }
+    if (elToMove.element_type === 'column') {
+      if (boardElement && boardElement.style?.parent_column_id === elToMove.id) {
+        return;
+      }
+      const isInsideCol = elements.some(c => c.style?.parent_column_id === elToMove.id && (c.id === targetBoardId || c.id === resolvedTargetId || c.content?.target_board_id === resolvedTargetId));
+      if (isInsideCol) return;
+    }
+
     const connectedLineIds = getConnectedLinesToDelete([elementId], elements);
     const idsToRemove = [elementId, ...connectedLineIds];
     setElements((prev) => prev.filter((el) => !idsToRemove.includes(el.id)));
@@ -1855,6 +1872,10 @@ export const App: React.FC = () => {
           onStyleChange={handleStyleChange}
           onContextMenu={(e, element, canvasPos, tableSubTarget) => {
             if (getDeviceCategory() === 'phone') return;
+            if (editingElementId) return;
+            const native = e.nativeEvent as any;
+            if (native?.sourceCapabilities?.firesTouchEvents) return;
+            if (isTouchPrimary()) return;
             setContextMenu({ x: e.clientX, y: e.clientY, canvasX: canvasPos?.x, canvasY: canvasPos?.y, element, tableSubTarget });
           }}
           onOpenBoard={handleOpenBoard}

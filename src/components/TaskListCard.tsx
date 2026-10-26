@@ -298,6 +298,13 @@ export const TaskListCard: React.FC<TaskListCardProps> = ({
           readOnly={!isEditing}
           onPointerDown={(e) => { if (isEditing) e.stopPropagation(); }}
           onMouseDown={(e) => { if (isEditing) e.stopPropagation(); }}
+          onClick={(e) => {
+            if (isEditing) {
+              e.stopPropagation();
+            } else {
+              onSetEditingElement(el.id);
+            }
+          }}
           onChange={(e) => onContentChange(el.id, { ...el.content, title: e.target.value })}
           placeholder="New To-do List"
         />
@@ -351,6 +358,13 @@ export const TaskListCard: React.FC<TaskListCardProps> = ({
                 }}
                 onMouseDown={(e) => {
                   if (isEditing) e.stopPropagation();
+                }}
+                onClick={(e) => {
+                  if (isEditing) {
+                    e.stopPropagation();
+                  } else {
+                    onSetEditingElement(el.id);
+                  }
                 }}
                 onKeyDown={(e) => {
                   e.stopPropagation();
