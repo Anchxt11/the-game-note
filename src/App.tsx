@@ -21,6 +21,7 @@ import { SyncSettingsModal } from './components/SyncSettingsModal';
 import { isPhoneScreen, isTouchPrimary, isTablet, isAndroidTablet, getDeviceCategory } from './utils/platform';
 import { ipcService, syncService, resolveBoardId, CANONICAL_ROOT_BOARD_ID } from './services/ipc';
 import { imageCache } from './services/imageCache';
+import { getBoardThemeForTitle } from './utils/boardIconUtils';
 import { getConnectedLinesToDelete, pruneOrphanedLines } from './utils/lineUtils';
 import { listen } from '@tauri-apps/api/event';
 import { 
@@ -787,9 +788,65 @@ export const App: React.FC = () => {
 
   const handleContentChange = async (id: string, newContent: Record<string, any>) => {
     recordHistory(elements);
-    setElements((prev) => prev.map((el) => (el.id === id ? { ...el, content: newContent } : el)));
+
+    const currentEl = elements.find((el) => el.id === id);
+    let finalContent = newContent;
+    let styleToUpdate: Record<string, any> | null = null;
+
+    if (currentEl?.element_type === 'nested_board' && newContent.title !== undefined) {
+      const oldTitle = currentEl.content?.title;
+      const newTitle = newContent.title;
+
+      if (newTitle !== oldTitle) {
+        const theme = getBoardThemeForTitle(newTitle);
+        const isIconLocked = Boolean(currentEl.content?.custom_icon_locked);
+        const isColorLocked = Boolean(currentEl.style?.board_color_locked);
+
+        if (!isIconLocked && !newContent.custom_icon_locked) {
+          finalContent = {
+            ...finalContent,
+            custom_icon: theme.icon,
+            custom_image_url: null,
+            custom_image_file_id: null,
+          };
+        }
+
+        if (!isColorLocked) {
+          styleToUpdate = {
+            ...(currentEl.style || {}),
+            board_color: theme.color,
+            board_gradient: null,
+          };
+        }
+
+        if (currentEl.content?.target_board_id) {
+          try {
+            await ipcService.updateBoard(currentEl.content.target_board_id, newTitle);
+          } catch (e) {
+            console.error('Failed to update board title in db:', e);
+          }
+        }
+      }
+    }
+
+    setElements((prev) =>
+      prev.map((el) => {
+        if (el.id === id) {
+          return {
+            ...el,
+            content: finalContent,
+            style: styleToUpdate ? styleToUpdate : el.style,
+          };
+        }
+        return el;
+      })
+    );
+
     try {
-      await ipcService.updateElementContent(id, newContent);
+      await ipcService.updateElementContent(id, finalContent);
+      if (styleToUpdate) {
+        await ipcService.updateElementStyle(id, styleToUpdate);
+      }
       queueDebouncedSync(false);
     } catch (e) {
       console.error('Failed to update content:', e);
@@ -1008,10 +1065,13 @@ export const App: React.FC = () => {
       } catch (err) {
         console.error('Failed to create board in db:', err);
       }
+      const initialTheme = getBoardThemeForTitle('New Board');
       initialContent = {
         title: 'New Board',
         preview_title: 'New Board',
-        target_board_id: subBoardId
+        target_board_id: subBoardId,
+        custom_icon: initialTheme.icon,
+        custom_icon_locked: false,
       };
       defaultWidth = 80;
       defaultHeight = 100;
@@ -1065,7 +1125,14 @@ export const App: React.FC = () => {
       parent_column_id: targetColumnId || null,
       ...(isUnsorted ? { is_unsorted: true } : {}),
     };
-    if (tool === 'line') {
+    if (tool === 'nested_board') {
+      const initialTheme = getBoardThemeForTitle('New Board');
+      initialStyle = {
+        ...initialStyle,
+        board_color: initialTheme.color,
+        board_color_locked: false,
+      };
+    } else if (tool === 'line') {
       initialStyle = {
         ...initialStyle,
         line_color: '#a8b0c0',
@@ -1093,7 +1160,7 @@ export const App: React.FC = () => {
       setSelectedElementId(newEl.id);
       setSelectedIds([newEl.id]);
 
-      if (tool === 'note' || tool === 'heading' || tool === 'link' || tool === 'task_list') {
+      if (tool === 'note' || tool === 'heading' || tool === 'link' || tool === 'task_list' || tool === 'nested_board') {
         setEditingElementId(newEl.id);
       }
     }
@@ -1385,10 +1452,43 @@ export const App: React.FC = () => {
     }
   };
 
-  const handleSetBoardIcon = (boardId: string, iconName: string) => {
+  const handleSetBoardIcon = async (boardId: string, iconName: string, imageUrl?: string) => {
     const boardEl = elements.find((x) => x.id === boardId);
     if (!boardEl) return;
-    handleContentChange(boardId, { ...boardEl.content, custom_icon: iconName });
+
+    let storedFileId: string | null = null;
+    if (imageUrl) {
+      try {
+        const stored = await ipcService.storeImageFile(imageUrl);
+        storedFileId = stored.file_id;
+        imageCache.set(stored.file_id, imageUrl);
+      } catch (err) {
+        console.warn('Could not persist image file in db, using data URL fallback:', err);
+      }
+    }
+
+    const updatedContent = {
+      ...boardEl.content,
+      custom_icon: iconName,
+      custom_image_url: imageUrl || null,
+      custom_image_file_id: storedFileId || null,
+      custom_icon_locked: true,
+    };
+    handleContentChange(boardId, updatedContent);
+  };
+
+  const handleRemoveBoardImageIcon = (boardId: string) => {
+    const boardEl = elements.find((x) => x.id === boardId);
+    if (!boardEl) return;
+    const theme = getBoardThemeForTitle(boardEl.content?.title);
+    const updatedContent = {
+      ...boardEl.content,
+      custom_icon: theme.icon,
+      custom_image_url: null,
+      custom_image_file_id: null,
+      custom_icon_locked: false,
+    };
+    handleContentChange(boardId, updatedContent);
   };
 
   const handleToggleCommentPin = (commentId: string, pinState: boolean) => {
@@ -1749,6 +1849,7 @@ export const App: React.FC = () => {
             onDelete={() => handleDelete(selectedElementId || undefined)}
             onStyleChange={handleStyleChange}
             onSetIcon={handleSetBoardIcon}
+            onRemoveImageIcon={handleRemoveBoardImageIcon}
             onRename={(id) => setEditingElementId(id)}
           />
         ) : activeSelectedComment ? (

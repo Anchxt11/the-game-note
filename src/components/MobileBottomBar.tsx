@@ -43,6 +43,8 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { SyncStatusIndicator } from './SyncStatusIndicator';
+import { BoardIconPanel } from './BoardIconPanel';
+import { BoardIconRenderer, getBoardThemeForTitle } from '../utils/boardIconUtils';
 
 interface MobileBottomBarProps {
   currentBoardId: string;
@@ -73,7 +75,7 @@ interface MobileBottomBarProps {
   onSetTaskDueDate?: (id: string, date: string | null) => void;
   onToggleCaption?: (id: string) => void;
   onRename?: (id: string) => void;
-  onSetIcon?: (id: string, icon: string) => void;
+  onSetIcon?: (id: string, icon: string, imageUrl?: string) => void;
   resetTrigger?: number;
   editingElement?: Element | null;
   onDoneEditing?: () => void;
@@ -158,6 +160,7 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
   const [activeMenu, setActiveMenu] = useState<'default' | 'system' | 'tools'>('default');
   const [showMoreContextMenu, setShowMoreContextMenu] = useState(false);
   const [showColorPalette, setShowColorPalette] = useState(false);
+  const [showBoardIconModal, setShowBoardIconModal] = useState(false);
   const [showDateMenu, setShowDateMenu] = useState(false);
   const [showLineWeightMenu, setShowLineWeightMenu] = useState(false);
   const [activeCellMenu, setActiveCellMenu] = useState<'textStyle' | 'cellType' | 'color' | 'alignment' | null>(null);
@@ -860,6 +863,34 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
             >
               <span>Move to Trash</span>
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* MOBILE BOARD ICON MODAL (SCREENSHOT 1 PARITY) */}
+      {showBoardIconModal && selectedElement?.element_type === 'nested_board' && (
+        <div
+          className="mobile-board-icon-backdrop"
+          onClick={() => setShowBoardIconModal(false)}
+        >
+          <div className="mobile-board-icon-modal" onClick={(e) => e.stopPropagation()}>
+            <BoardIconPanel
+              element={selectedElement}
+              onSelectIcon={(iconName) => {
+                onSetIcon?.(selectedElement.id, iconName);
+                setShowBoardIconModal(false);
+              }}
+              onUploadImage={(dataUrl) => {
+                onSetIcon?.(selectedElement.id, 'IMAGE_UPLOAD', dataUrl);
+                setShowBoardIconModal(false);
+              }}
+              onRemoveImage={() => {
+                const theme = getBoardThemeForTitle(selectedElement.content?.title);
+                onSetIcon?.(selectedElement.id, theme.icon);
+                setShowBoardIconModal(false);
+              }}
+              onClose={() => setShowBoardIconModal(false)}
+            />
           </div>
         </div>
       )}
@@ -1861,8 +1892,22 @@ export const MobileBottomBar: React.FC<MobileBottomBarProps> = ({
                   {/* NESTED BOARD ACTIONS */}
                   {selectedElement?.element_type === 'nested_board' && (
                     <>
-                      <button className="mobile-action-btn" onClick={() => onSetIcon?.(selectedElement.id, 'FolderPlus')} title="Board icon">
-                        <div className="mobile-action-icon-box"><Folder size={19} /></div>
+                      <button
+                        className={`mobile-action-btn ${showBoardIconModal ? 'active' : ''}`}
+                        onClick={() => {
+                          setShowBoardIconModal(!showBoardIconModal);
+                          setShowColorPalette(false);
+                        }}
+                        title="Board icon"
+                      >
+                        <div className="mobile-action-icon-box" style={{ overflow: 'hidden' }}>
+                          <BoardIconRenderer
+                            iconName={selectedElement.content?.custom_icon || getBoardThemeForTitle(selectedElement.content?.title).icon}
+                            imageUrl={selectedElement.content?.custom_image_url}
+                            size={18}
+                            color="#ffffff"
+                          />
+                        </div>
                         <span>Icon</span>
                       </button>
                       <button className="mobile-action-btn" onClick={() => onRename?.(selectedElement.id)} title="Rename board">

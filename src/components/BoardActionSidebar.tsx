@@ -1,72 +1,24 @@
 import React, { useState } from 'react';
-import {
-  ArrowLeft,
-  FolderPlus,
-  BookOpen,
-  Brain,
-  Palette,
-  Globe,
-  FileText,
-  Share2,
-  Layers,
-  Film,
-  Code,
-  Volume2,
-  Scale,
-  History,
-  HelpCircle,
-  Image as ImageIcon,
-  User,
-  Type,
-  Trash2
-} from 'lucide-react';
+import { ArrowLeft, Type, Trash2 } from 'lucide-react';
 import { Element } from '../types';
+import { BoardIconPanel } from './BoardIconPanel';
+import {
+  BoardIconRenderer,
+  getBoardThemeForTitle,
+  MILANOTE_SOLID_BOARD_COLORS,
+  MILANOTE_DIAGONAL_SWATCHES,
+  MILANOTE_PASTEL_COLORS
+} from '../utils/boardIconUtils';
 
 interface BoardActionSidebarProps {
   element: Element | null;
   onClose: () => void;
   onDelete: () => void;
   onStyleChange: (id: string, newStyle: Record<string, any>) => void;
-  onSetIcon: (boardId: string, iconName: string) => void;
+  onSetIcon: (boardId: string, iconName: string, imageUrl?: string) => void;
+  onRemoveImageIcon?: (boardId: string) => void;
   onRename: (boardId: string) => void;
 }
-
-const SOLID_BOARD_COLORS = [
-  '#dde1e7', '#6b7280', '#4de6c0', '#6ce858',
-  '#f19e59', '#ffd046', '#ff8f35', '#f65555',
-  '#fa65c2', '#a462fb', '#46b8fb', '#587af7'
-];
-
-const DIAGONAL_BOARD_SWATCHES = [
-  { name: 'orange-brown', bg: '#8c562e', gradient: 'linear-gradient(135deg, #e5985b 50%, #462817 50%)' },
-  { name: 'beige-brown', bg: '#977258', gradient: 'linear-gradient(135deg, #d3c0b0 50%, #462817 50%)' },
-  { name: 'olive-green', bg: '#757d54', gradient: 'linear-gradient(135deg, #c7cdb1 50%, #343c24 50%)' },
-  { name: 'cream-rust', bg: '#b68356', gradient: 'linear-gradient(135deg, #f1ebb8 50%, #7e4d29 50%)' },
-];
-
-const PASTEL_BOARD_COLORS = [
-  '#d69068', '#cc907b', '#debba9', '#ded1c1', '#ded6b4',
-  '#b6be9c', '#bec485'
-];
-
-const BOARD_ICON_GALLERY: Array<{ name: string; Icon: any }> = [
-  { name: 'FolderPlus', Icon: FolderPlus },
-  { name: 'BookOpen', Icon: BookOpen },
-  { name: 'Brain', Icon: Brain },
-  { name: 'Palette', Icon: Palette },
-  { name: 'Globe', Icon: Globe },
-  { name: 'FileText', Icon: FileText },
-  { name: 'Share2', Icon: Share2 },
-  { name: 'Layers', Icon: Layers },
-  { name: 'Film', Icon: Film },
-  { name: 'Code', Icon: Code },
-  { name: 'Volume2', Icon: Volume2 },
-  { name: 'Scale', Icon: Scale },
-  { name: 'History', Icon: History },
-  { name: 'HelpCircle', Icon: HelpCircle },
-  { name: 'ImageIcon', Icon: ImageIcon },
-  { name: 'User', Icon: User },
-];
 
 export const BoardActionSidebar: React.FC<BoardActionSidebarProps> = ({
   element,
@@ -74,6 +26,7 @@ export const BoardActionSidebar: React.FC<BoardActionSidebarProps> = ({
   onDelete,
   onStyleChange,
   onSetIcon,
+  onRemoveImageIcon,
   onRename
 }) => {
   const [showColorMenu, setShowColorMenu] = useState(false);
@@ -84,18 +37,29 @@ export const BoardActionSidebar: React.FC<BoardActionSidebarProps> = ({
   const currentStyle = element.style || {};
   const activeColor = currentStyle.board_color || null;
   const activeGradient = currentStyle.board_gradient || null;
-  const activeIconName = element.content?.custom_icon || 'FolderPlus';
+
+  // Auto theme matching board title if custom icon/color isn't manually locked
+  const autoTheme = getBoardThemeForTitle(element.content?.title);
+  const activeIconName = element.content?.custom_icon || autoTheme.icon;
+  const activeImageUrl = element.content?.custom_image_url || null;
 
   const handleSolidColorSelect = (col: string) => {
-    onStyleChange(element.id, { ...currentStyle, board_color: col, board_gradient: null });
+    onStyleChange(element.id, {
+      ...currentStyle,
+      board_color: col,
+      board_color_locked: true,
+      board_gradient: null
+    });
   };
 
   const handleGradientSelect = (swatch: { bg: string; gradient: string }) => {
-    onStyleChange(element.id, { ...currentStyle, board_color: swatch.bg, board_gradient: swatch.gradient });
+    onStyleChange(element.id, {
+      ...currentStyle,
+      board_color: swatch.bg,
+      board_color_locked: true,
+      board_gradient: swatch.gradient
+    });
   };
-
-  // Find current icon component for preview button
-  const ActiveIconComp = BOARD_ICON_GALLERY.find((x) => x.name === activeIconName)?.Icon || FolderPlus;
 
   return (
     <aside className="milanote-sub-sidebar" style={{ position: 'relative', overflow: 'visible' }}>
@@ -122,7 +86,7 @@ export const BoardActionSidebar: React.FC<BoardActionSidebarProps> = ({
               width: '18px', 
               height: '16px', 
               borderRadius: '3px', 
-              background: activeGradient || activeColor || 'linear-gradient(135deg, #c7cdb1 50%, #343c24 50%)',
+              background: activeGradient || activeColor || autoTheme.color || 'linear-gradient(135deg, #c7cdb1 50%, #343c24 50%)',
               border: '1px solid rgba(255, 255, 255, 0.35)',
               boxShadow: '0 1px 3px rgba(0,0,0,0.4)'
             }} />
@@ -130,12 +94,12 @@ export const BoardActionSidebar: React.FC<BoardActionSidebarProps> = ({
           <span className="note-action-label">Color</span>
         </button>
 
-        {/* FLOATING BOARD COLOR PALETTE DRAWER (SCREENSHOT 1 PARITY) */}
+        {/* FLOATING BOARD COLOR PALETTE DRAWER */}
         {showColorMenu && (
           <div className="color-menu-drawer" onClick={(e) => e.stopPropagation()} style={{ top: '6px', left: '64px', width: '210px' }}>
             {/* Grid 1: 12 Solid Board Colors */}
             <div className="color-swatches-grid-main">
-              {SOLID_BOARD_COLORS.map((col, idx) => {
+              {MILANOTE_SOLID_BOARD_COLORS.map((col, idx) => {
                 const isSelected = activeColor === col && !activeGradient;
                 return (
                   <div
@@ -151,9 +115,9 @@ export const BoardActionSidebar: React.FC<BoardActionSidebarProps> = ({
 
             <div className="color-menu-divider" style={{ margin: '12px -14px 12px -14px' }} />
 
-            {/* Grid 2: 4 Two-Tone Diagonal Gradients (Screenshot 1 Parity) */}
+            {/* Grid 2: 4 Two-Tone Diagonal Gradients */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px', paddingLeft: '2px' }}>
-              {DIAGONAL_BOARD_SWATCHES.map((swatch, idx) => {
+              {MILANOTE_DIAGONAL_SWATCHES.map((swatch, idx) => {
                 const isSelected = activeGradient === swatch.gradient || activeColor === swatch.bg;
                 return (
                   <div
@@ -171,7 +135,7 @@ export const BoardActionSidebar: React.FC<BoardActionSidebarProps> = ({
 
             {/* Grid 3: Neutral Pastels */}
             <div className="color-swatches-grid-main" style={{ marginBottom: '10px' }}>
-              {PASTEL_BOARD_COLORS.map((col, idx) => {
+              {MILANOTE_PASTEL_COLORS.map((col, idx) => {
                 const isSelected = activeColor === col && !activeGradient;
                 return (
                   <div
@@ -199,7 +163,7 @@ export const BoardActionSidebar: React.FC<BoardActionSidebarProps> = ({
         )}
       </div>
 
-      {/* ICON GALLERY BUTTON */}
+      {/* ICON ACTION BUTTON & MILANOTE POPOVER PANEL */}
       <div style={{ width: '100%', position: 'relative' }}>
         <button 
           className={`note-action-btn ${showIconMenu ? 'active' : ''}`}
@@ -215,40 +179,39 @@ export const BoardActionSidebar: React.FC<BoardActionSidebarProps> = ({
               border: '1px solid rgba(255,255,255,0.2)', 
               display: 'flex', 
               alignItems: 'center', 
-              justifyContent: 'center' 
+              justifyContent: 'center',
+              overflow: 'hidden'
             }}>
-              <ActiveIconComp size={13} color="#c5cbe0" />
+              <BoardIconRenderer
+                iconName={activeIconName}
+                imageUrl={activeImageUrl}
+                size={14}
+                color="#c5cbe0"
+              />
             </div>
           </div>
           <span className="note-action-label">Icon</span>
         </button>
 
-        {/* FLOATING ICON GALLERY DRAWER */}
+        {/* MILANOTE EXACT ICON PANEL POPOVER */}
         {showIconMenu && (
-          <div className="icon-menu-drawer" onClick={(e) => e.stopPropagation()} style={{ top: '-10px', left: '64px' }}>
-            <div style={{ fontSize: '12px', fontWeight: 700, color: '#9fa8bd', marginBottom: '8px', paddingLeft: '2px' }}>
-              Select Board Icon
-            </div>
-            <div className="icon-gallery-grid">
-              {BOARD_ICON_GALLERY.map((item, idx) => {
-                const isSelected = activeIconName === item.name;
-                const ItemIcon = item.Icon;
-                return (
-                  <button
-                    key={idx}
-                    className={`icon-chip ${isSelected ? 'selected' : ''}`}
-                    onClick={() => {
-                      onSetIcon(element.id, item.name);
-                      setShowIconMenu(false);
-                    }}
-                    title={item.name}
-                  >
-                    <ItemIcon size={18} />
-                  </button>
-                );
-              })}
-            </div>
-          </div>
+          <BoardIconPanel
+            element={element}
+            onSelectIcon={(iconName) => {
+              onSetIcon(element.id, iconName);
+            }}
+            onUploadImage={(dataUrl) => {
+              onSetIcon(element.id, 'IMAGE_UPLOAD', dataUrl);
+            }}
+            onRemoveImage={() => {
+              if (onRemoveImageIcon) {
+                onRemoveImageIcon(element.id);
+              } else {
+                onSetIcon(element.id, autoTheme.icon);
+              }
+            }}
+            onClose={() => setShowIconMenu(false)}
+          />
         )}
       </div>
 

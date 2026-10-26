@@ -37,6 +37,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { useImageAttachment, imageCache } from '../services/imageCache';
+import { BoardIconRenderer, getBoardThemeForTitle } from '../utils/boardIconUtils';
 
 const isLightColor = (hex?: string): boolean => {
   if (!hex || hex === 'transparent' || !hex.startsWith('#')) return false;
@@ -987,29 +988,14 @@ export interface CanvasProps {
   onMinScaleChange?: (minScale: number) => void;
 }
 
-const ICON_NAME_MAP: Record<string, any> = {
-  FolderPlus, BookOpen, Brain, Palette, Globe, FileText, Share2, Layers, Film, Code, Volume2, Scale, History, HelpCircle, ImageIcon, User
-};
-
-function getBoardBadgeStyle(title: string = '', customIcon?: string) {
-  const custom = customIcon && ICON_NAME_MAP[customIcon] ? ICON_NAME_MAP[customIcon] : null;
-  const lower = title.toLowerCase();
-  if (lower.includes('story')) return { Icon: custom || BookOpen, badgeBg: '#c27c3e', cards: '17 cards' };
-  if (lower.includes('brain') || lower.includes('storm')) return { Icon: custom || Brain, badgeBg: '#4ca674', cards: '0 cards' };
-  if (lower.includes('mood')) return { Icon: custom || Palette, badgeBg: '#52798e', cards: '0 cards' };
-  if (lower.includes('core') || lower.includes('mech')) return { Icon: custom || ChevronRight, badgeBg: '#e65360', cards: '22 cards' };
-  if (lower.includes('weapon') || lower.includes('arsenal')) return { Icon: custom || Scale, badgeBg: '#e85c88', cards: '1 card' };
-  if (lower.includes('time') || lower.includes('travel') || lower.includes('history')) return { Icon: custom || History, badgeBg: '#df9a65', cards: '0 cards' };
-  if (lower.includes('world') || lower.includes('globe') || lower.includes('map')) return { Icon: custom || Globe, badgeBg: '#5dcbb2', cards: '21 cards, 1 file' };
-  if (lower.includes('concept') || lower.includes('level')) return { Icon: custom || HelpCircle, badgeBg: '#83d1c4', cards: '0 cards' };
-  if (lower.includes('doc') || lower.includes('file') || lower.includes('document')) return { Icon: custom || FileText, badgeBg: '#6bc8b3', cards: '10 cards, 1 file' };
-  if (lower.includes('relation') || lower.includes('share') || lower.includes('network')) return { Icon: custom || Share2, badgeBg: '#ff4c78', cards: '4 boards, 22 cards' };
-  if (lower.includes('asset') || lower.includes('tech') || lower.includes('art')) return { Icon: custom || Layers, badgeBg: '#769fb6', cards: '0 cards' };
-  if (lower.includes('anim') || lower.includes('vfx') || lower.includes('gif')) return { Icon: custom || Film, badgeBg: '#ffd185', cards: '0 cards' };
-  if (lower.includes('cine') || lower.includes('script') || lower.includes('cutscene')) return { Icon: custom || Code, badgeBg: '#74bfc8', cards: '0 cards' };
-  if (lower.includes('sound') || lower.includes('audio') || lower.includes('music')) return { Icon: custom || Volume2, badgeBg: '#f37272', cards: '0 cards' };
-  
-  return { Icon: custom || null, badgeBg: '#c5c8cf', cards: '0 cards' };
+function getBoardBadgeStyle(title: string = '', customIcon?: string, isLocked: boolean = false) {
+  const theme = getBoardThemeForTitle(title);
+  const activeIcon = (isLocked && customIcon) ? customIcon : (customIcon || theme.icon);
+  return {
+    iconName: activeIcon,
+    badgeBg: theme.color,
+    cards: '0 cards'
+  };
 }
 
 const InlineCommentBubble: React.FC<{
@@ -4471,8 +4457,8 @@ export const Canvas: React.FC<CanvasProps> = ({
     const isEditing = editingElementId === el.id;
 
     if (el.element_type === 'nested_board') {
-      const badge = getBoardBadgeStyle(el.content.title, el.content.custom_icon);
-      const BadgeIcon = badge.Icon;
+      const isIconLocked = Boolean(el.content?.custom_icon_locked);
+      const badge = getBoardBadgeStyle(el.content.title, el.content.custom_icon, isIconLocked);
       const boardBg = el.style?.board_gradient || el.style?.board_color || badge.badgeBg;
 
       if (inColumn) {
@@ -4534,8 +4520,14 @@ export const Canvas: React.FC<CanvasProps> = ({
               onContextMenu(e, el);
             }}
           >
-            <div className="column-board-icon-box" style={{ background: boardBg, position: 'relative' }}>
-              {BadgeIcon && <BadgeIcon size={22} color="#ffffff" />}
+            <div className="column-board-icon-box" style={{ background: boardBg, position: 'relative', overflow: 'hidden' }}>
+              <BoardIconRenderer
+                iconName={badge.iconName}
+                imageUrl={el.content?.custom_image_url}
+                size={22}
+                color="#ffffff"
+                isBadge={true}
+              />
               {(el.content.is_shortcut || el.content.shortcut_target_id) && (
                 <div
                   style={{
@@ -5417,8 +5409,8 @@ export const Canvas: React.FC<CanvasProps> = ({
     }
 
     if (isBoard && !inColumn) {
-      const badge = getBoardBadgeStyle(el.content.title, el.content.custom_icon);
-      const BadgeIcon = badge.Icon;
+      const isIconLocked = Boolean(el.content?.custom_icon_locked);
+      const badge = getBoardBadgeStyle(el.content.title, el.content.custom_icon, isIconLocked);
       const boardBg = el.style?.board_gradient || el.style?.board_color || badge.badgeBg;
       const dragItem = isDragging ? dragRef.current?.dragGroup.find(g => g.id === el.id) : null;
       const posX = (dragItem && dragItem.currentX !== undefined) ? dragItem.currentX : el.x;
@@ -5490,8 +5482,14 @@ export const Canvas: React.FC<CanvasProps> = ({
               onContextMenu(e, el);
             }}
           >
-            <div className="board-icon-badge" style={{ background: boardBg, position: 'relative' }}>
-              {BadgeIcon && <BadgeIcon size={36} color="#ffffff" />}
+            <div className="board-icon-badge" style={{ background: boardBg, position: 'relative', overflow: 'hidden' }}>
+              <BoardIconRenderer
+                iconName={badge.iconName}
+                imageUrl={el.content?.custom_image_url}
+                size={36}
+                color="#ffffff"
+                isBadge={true}
+              />
               {(el.content.is_shortcut || el.content.shortcut_target_id) && (
                 <div
                   style={{
